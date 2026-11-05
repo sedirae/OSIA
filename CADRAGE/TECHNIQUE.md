@@ -211,7 +211,7 @@ Chaque objet durable porte un identifiant stable, un numéro de version de sché
 1. Aucune assertion factuelle « étayée » sans au moins une référence de preuve consultable (ou mention explicite qu'elle n'est pas vérifiée).
 2. Aucune preuve originale modifiée par une correction humaine ; annotation et projection séparées.
 3. Aucune fusion d'entités irréversible : conserver aliases, correspondances, versions et possibilité de séparation.
-4. Un statut « accepté par l'utilisateur » n'équivalaut pas automatiquement à « vérifié dans les sources ».
+4. Un statut « accepté par l'utilisateur » n'équivaut pas automatiquement à « vérifié dans les sources ».
 5. Une contradiction reste accessible après consolidation, même si une hypothèse est privilégiée.
 6. Une suppression de cache n'efface jamais, par effet de bord, une preuve conservée dans le dossier d'investigation.
 7. Les projections synthèse/graphe/rapports sont reconstructibles depuis données et décisions versionnées.
@@ -266,7 +266,7 @@ OSIA_DATA/
   logs/           journaux techniques expurgés et bornés
 ~~~
 
-Utiliser des transactions atomiques, intégrité référentielle, migrations versionnées réversibles quand possible, snapshots cohérents et vérification de restauration. Le mode WAL SQLite doit être intégré à la méthode de sauvegarde ; copier seulement le fichier principal pendant une session active ne suffit pas à garantir un snapshot cohérent.
+Utiliser des transactions atomiques, intégrité référentielle, migrations versionnées réversibles quand possible, snapshots cohérents et vérification de restauration. Le mode WAL SQLite doit être intégré à la méthode de sauvegarde ; copier seulement le fichier principal pendant une session active ne suffit pas à garantir un snapshot cohérent. Préférer une sauvegarde via API de copie cohérente (Online Backup API ou mécanisme équivalent) et vérifier aussi les pièces externes référencées.
 
 ### 8.2 Archive .osia
 
@@ -365,7 +365,7 @@ Chaque étape est une **proposition de séquencement**, pas une date ni une auto
 ## 14. Références d'implémentation consultées (indicatives)
 
 - Tauri v2 — architecture et permissions : https://v2.tauri.app/concept/architecture/ ; https://tauri.app/security/capabilities/
-- SQLite — WAL et FTS5 : https://sqlite.org/wal.html ; https://www.sqlite.org/fts5.html
+- SQLite — WAL et FTS5 : https://sqlite.org/wal.html ; https://www.sqlite.org/fts5.html ; https://www.sqlite.org/backup.html
 - Playwright Python — automatisation navigateur : https://playwright.dev/python/docs/intro
 - FastAPI — limites des simples tâches d'arrière-plan pour les travaux lourds : https://fastapi.tiangolo.com/tutorial/background-tasks/
 
