@@ -1,7 +1,7 @@
 # CADRAGE — Références du projet OSIA
 
 **Mise à jour :** 05/11/2026  
-**Situation :** quatre lots de cadrage fonctionnel **validés**, import de leurs documents originaux **en attente** ; conception technique **PROPOSÉE v0.1**.
+**Situation :** quatre lots de cadrage fonctionnel **validés**, import de leurs originaux **en attente** ; **lot technique T1 validé** le 06/11/2026 ; conception technique transversale toujours **PROPOSÉE v0.1**.
 
 ## Ordre de priorité des sources
 
@@ -14,7 +14,8 @@
 
 | Document | Description | Statut |
 | --- | --- | --- |
-| [TECHNIQUE.md](TECHNIQUE.md) | Proposition d'architecture, contrats, données, budgets, sécurité, export et recette | **PROPOSÉ v0.1** |
+| [TECHNIQUE.md](TECHNIQUE.md) | Architecture transversale et synthèse des arbitrages T1–T8 | **PROPOSÉ v0.1** sauf décisions T1 validées |
+| [T1-EXECUTION-DISTRIBUTION.md](T1-EXECUTION-DISTRIBUTION.md) | Distribution native Linux, postes/serveurs, interfaces web/GTK, API et accès | **VALIDÉ v1.0 — T1.1–T1.7** |
 | [FONCTIONNEL.md](FONCTIONNEL.md) | Trame issue du template, en attente de remplacement/consolidation fidèle des lots A–D | **NON NORMATIF** |
 | [DESIGN.md](DESIGN.md) | Trame du template à adapter après exploitation de C et des décisions graphiques | **NON NORMATIF** |
 
