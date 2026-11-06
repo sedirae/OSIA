@@ -106,9 +106,15 @@ class AIBroker:
         try:
             if self.semaphore is not None:
                 async with self.semaphore:
-                    output = await adapter.complete(role, prompt, input_data, response_model)
+                    output = await asyncio.wait_for(
+                        adapter.complete(role, prompt, input_data, response_model),
+                        timeout=decision.timeout_seconds or 60,
+                    )
             else:
-                output = await adapter.complete(role, prompt, input_data, response_model)
+                output = await asyncio.wait_for(
+                    adapter.complete(role, prompt, input_data, response_model),
+                    timeout=decision.timeout_seconds or 60,
+                )
         except ValidationError as exc:
             await self.engine.fail_op(op_id, f"sortie_invalide:{exc.error_count()}")
             await self.bus.emit(

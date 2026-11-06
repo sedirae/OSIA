@@ -13,9 +13,8 @@ from .models import (
     InvestigationState,
     PolicyDeny,
     StopReason,
-    resolve_limits,
 )
-from .policies.limits import limits_from_record
+from .policies.limits import limits_from_profile_row, limits_from_record
 from .store.repo import Repo, _norm_row
 
 
@@ -41,7 +40,7 @@ class Orchestrator:
                 profile = await conn.fetchrow("SELECT * FROM profiles WHERE id = $1", req.profile_id)
                 if profile is None:
                     raise PolicyDeny(f"profil_inconnu:{req.profile_id}", "policy")
-                limits = resolve_limits(req.profile_id, req.limits)
+                limits = limits_from_profile_row(profile, req.limits)
                 inv = _norm_row(
                     await conn.fetchrow(
                         "INSERT INTO investigations (id, title, objective, hints, profile_id, effective_limits, state, idempotency_key) "
@@ -99,21 +98,33 @@ class Orchestrator:
         if inv is None:
             raise PolicyDeny("investigation_inconnue", "branche")
         inv_limits = limits_from_record(inv)
-        branch_limits = resolve_limits(inv["profile_id"], req.limits)
+        profile = await self.repo.get_profile(inv["profile_id"])
+        if profile is None:
+            raise PolicyDeny(f"profil_inconnu:{inv['profile_id']}", "branche")
+        branch_limits = limits_from_profile_row(profile, req.limits)
         for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
             if getattr(branch_limits, field) > getattr(inv_limits, field):
                 raise PolicyDeny(f"plafond_branche_superieur:{field}", "branche")
+        depth = 0
+        if req.parent_branch_id:
+            parent = await self.repo.get_branch(req.parent_branch_id)
+            if parent is None or parent["investigation_id"] != investigation_id:
+                raise PolicyDeny("branche_parente_inconnue_ou_etrangere", "branche")
+            depth = int(parent["depth"]) + 1
+            if depth > 10:
+                raise PolicyDeny("profondeur_max_atteinte", "branche")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 branch = _norm_row(
                     await conn.fetchrow(
                         "INSERT INTO branches (id, investigation_id, parent_branch_id, objective, effective_limits, state, depth, idempotency_key) "
-                        "VALUES ($1, $2, $3, $4, $5::jsonb, 'running', 0, $6) RETURNING *",
+                        "VALUES ($1, $2, $3, $4, $5::jsonb, 'running', $6, $7) RETURNING *",
                         new_id("br"),
                         investigation_id,
                         req.parent_branch_id,
                         req.objective,
                         json.dumps(branch_limits.model_dump(), ensure_ascii=False),
+                        depth,
                         req.idempotency_key,
                     )
                 )
@@ -144,6 +155,7 @@ class Orchestrator:
                         reason.value,
                     )
                 )
+                matched = inv is not None
                 if inv is None:
                     inv = await self.repo.get_investigation(investigation_id)
                 await conn.execute(
@@ -162,7 +174,7 @@ class Orchestrator:
                     "WHERE investigation_id = $1 AND state IN ('reserved','in_flight')",
                     investigation_id,
                 )
-        if inv is not None:
+        if matched:
             await self.bus.emit(
                 type="investigation.stopped",
                 investigation_id=investigation_id,
@@ -192,6 +204,18 @@ class Orchestrator:
             raise PolicyDeny("investigation_inconnue", "reprise")
         if inv["state"] != InvestigationState.SUSPENDED.value:
             raise PolicyDeny(f"reprise_impossible:{inv['state']}", "reprise")
+        uncertain = int(
+            await self.pool.fetchval(
+                "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND state = 'uncertain'",
+                investigation_id,
+            )
+            or 0
+        )
+        if uncertain:
+            raise PolicyDeny(
+                f"reconciliation_requise:{uncertain} operation(s) incertaine(s) a reconcilier avant reprise",
+                "reprise",
+            )
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 inv = _norm_row(

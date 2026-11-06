@@ -82,7 +82,27 @@ async def _cmd_investigation_stop(args) -> int:
     engine = Engine(_settings())
     await engine.setup()
     inv = await engine.orchestrator.stop(args.id, StopReason.USER)
+    if inv is None:
+        print(f"investigation inconnue: {args.id}", file=sys.stderr)
+        return 1
     print(json.dumps({"id": inv["id"], "state": inv["state"], "stop_reason": inv["stop_reason"]}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_op_reconcile(args) -> int:
+    from .engine import Engine
+    from .models import PolicyDeny
+
+    engine = Engine(_settings())
+    await engine.setup()
+    try:
+        op = await engine.policy.reconcile_uncertain(args.id, billed=args.billed, actual_cents=args.actual_cents)
+    except PolicyDeny as deny:
+        print(f"réconciliation impossible: {deny.reason}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    print(json.dumps({"id": op["id"], "state": op["state"]}, ensure_ascii=False))
     await engine.pool.close()
     return 0
 
@@ -125,6 +145,14 @@ def main(argv: list[str] | None = None) -> int:
     stop = inv_sub.add_parser("stop", help="arrêter une investigation")
     stop.add_argument("id")
     stop.set_defaults(func=_cmd_investigation_stop)
+
+    op = sub.add_parser("op", help="gérer les opérations externes")
+    op_sub = op.add_subparsers(dest="op_command", required=True)
+    reconcile = op_sub.add_parser("reconcile", help="réconcilier une opération incertaine")
+    reconcile.add_argument("id")
+    reconcile.add_argument("--billed", action="store_true", help="l'appel a été facturé")
+    reconcile.add_argument("--actual-cents", type=int, default=None, help="coût réel en centimes si facturé")
+    reconcile.set_defaults(func=_cmd_op_reconcile)
 
     events = sub.add_parser("events", help="afficher le journal d'une investigation")
     events.add_argument("id")

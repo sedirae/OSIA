@@ -186,7 +186,7 @@ class Repo:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 return _norm_row(await conn.fetchrow(
-                    "UPDATE tasks SET state = 'claimed', started_at = now(), updated_at = now() "
+                    "UPDATE tasks SET state = 'claimed', started_at = now(), updated_at = now(), attempts = attempts + 1 "
                     "WHERE id = (SELECT t.id FROM tasks t JOIN investigations i ON i.id = t.investigation_id "
                     "WHERE t.state = 'queued' AND t.not_before <= now() AND i.state = 'running' "
                     "ORDER BY t.priority DESC, t.created_at LIMIT 1 FOR UPDATE OF t SKIP LOCKED) "
@@ -201,7 +201,7 @@ class Repo:
         finished: bool = False,
     ) -> asyncpg.Record:
         return await self._fetchrow(
-            "UPDATE tasks SET state = $2::text, error = COALESCE($4::text, error), attempts = attempts + 1, "
+            "UPDATE tasks SET state = $2::text, error = COALESCE($4::text, error), "
             "updated_at = now(), finished_at = CASE WHEN $3::boolean THEN now() ELSE finished_at END, "
             "started_at = COALESCE(started_at, now()) "
             "WHERE id = $1::text RETURNING *",

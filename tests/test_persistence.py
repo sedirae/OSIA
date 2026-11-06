@@ -19,6 +19,8 @@ async def test_proof_store_dedup_and_integrity(engine):
         investigation_id=inv["id"], content=b"contenu preuve", source_url="https://ex.test/b"
     )
     assert p1["sha256"] == p2["sha256"]
+    assert p1["deduplicated"] is False
+    assert p2["deduplicated"] is True
     refs = await engine.repo.list_proof_refs(inv["id"])
     assert len(refs) == 2
     files = await engine.repo.list_proof_files()
@@ -34,6 +36,11 @@ async def test_crash_simulation_orphan_and_missing(engine):
     part = engine.settings.paths.incoming_dir / "deadbeef.part"
     part.parent.mkdir(parents=True, exist_ok=True)
     part.write_bytes(b"orphelin")
+    import os
+    import time
+
+    stale = time.time() - 120
+    os.utime(part, (stale, stale))
     fake_sha = "ab" * 32
     await engine.pool.execute(
         "INSERT INTO proof_files (sha256, path, size_bytes) VALUES ($1, $2, 3)",

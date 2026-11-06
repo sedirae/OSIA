@@ -95,3 +95,23 @@ async def test_sse_replay_with_cursor(engine):
             await asyncio.wait_for(serve_task, timeout=10)
         except asyncio.TimeoutError:
             serve_task.cancel()
+
+
+async def test_concurrent_same_idempotency_key_yields_one_investigation(engine):
+    import asyncio
+
+    async with await client_for(engine) as client:
+        results = await asyncio.gather(
+            *[
+                client.post(
+                    "/api/v1/investigations", json={"title": "race"}, headers={"Idempotency-Key": "race-key"}
+                )
+                for _ in range(2)
+            ]
+        )
+        statuses = sorted(r.status_code for r in results)
+        assert statuses == [200, 201]
+        ids = {r.json()["id"] for r in results}
+        assert len(ids) == 1
+        count = await engine.pool.fetchval("SELECT COUNT(*) FROM investigations")
+        assert int(count) == 1

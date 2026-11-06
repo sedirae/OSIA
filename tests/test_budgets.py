@@ -76,3 +76,29 @@ async def test_budget_view_caps(engine):
     assert view.caps["investigation"] == 5
     assert view.caps["global_month"] == 0
     assert view.available_cents == 0
+
+
+async def test_concurrent_reservations_cannot_exceed_cap(engine):
+    import asyncio
+
+    await engine.repo.set_setting("paid_calls_enabled", True)
+    inv = await make_investigation(engine, limits={"max_cost_cents": 10})
+    ops = [await _mk_op(engine, inv["id"]) for _ in range(5)]
+    results = await asyncio.gather(
+        *[
+            engine.budgets.reserve(
+                idempotency_key=f"cc{i}", investigation_id=inv["id"], op_id=op["id"], amount_cents=4
+            )
+            for i, op in enumerate(ops)
+        ],
+        return_exceptions=True,
+    )
+    ok = [r for r in results if not isinstance(r, Exception)]
+    denied = [r for r in results if isinstance(r, PolicyDeny)]
+    assert len(ok) == 2
+    assert len(denied) == 3
+    total = await engine.pool.fetchval(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM reservations WHERE investigation_id = $1 AND state = 'reserved'",
+        inv["id"],
+    )
+    assert int(total) == 8

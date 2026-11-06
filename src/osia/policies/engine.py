@@ -150,6 +150,33 @@ class PolicyEngine:
     async def fail_op(self, op_id: str, error: str) -> None:
         await self._fail_op(op_id, error)
 
+    async def reconcile_uncertain(
+        self, op_id: str, *, billed: bool, actual_cents: Optional[int] = None
+    ) -> asyncpg.Record:
+        """Réconciliation explicite d'une op 'uncertain' (AGENTS.md règle 10, D7.4) :
+        facturée → consommation réelle au registre ; non facturée → libération de l'enveloppe."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
+                if row is None or row["state"] != "uncertain":
+                    raise PolicyDeny("operation_non_incertaine", "reconciliation")
+                if billed:
+                    amount = actual_cents
+                    if amount is None:
+                        amount = row["cost_estimated_cents"]
+                    if amount is None:
+                        raise PolicyDeny("cout_inconnu_bloque", "reconciliation")
+                    if row["reservation_id"]:
+                        await self.budgets.consume(row["reservation_id"], amount)
+                elif row["reservation_id"]:
+                    await self.budgets.release(
+                        row["reservation_id"], note="réconciliation : appel non facturé"
+                    )
+                return await conn.fetchrow(
+                    "UPDATE external_ops SET state = 'reconciled', updated_at = now() WHERE id = $1 RETURNING *",
+                    op_id,
+                )
+
     async def mark_uncertain(self, op_id: str) -> None:
         """Appel interrompu dont le résultat/facturation est inconnu (OSIA-I-09) : jamais relancé aveuglément."""
         await self.pool.execute(

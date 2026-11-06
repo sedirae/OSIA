@@ -6,6 +6,7 @@ import hmac
 import json
 from typing import Optional
 
+import asyncpg
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -79,7 +80,15 @@ def create_app(engine: Engine) -> FastAPI:
                 if existing["title"] != body.title:
                     raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
                 return JSONResponse(status_code=200, content=_inv_json(existing))
-        inv = await engine.orchestrator.start_investigation(body)
+        try:
+            inv = await engine.orchestrator.start_investigation(body)
+        except asyncpg.UniqueViolationError:
+            existing = await engine.repo.find_investigation_by_key(key)
+            if existing is None:
+                raise
+            if existing["title"] != body.title:
+                raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
+            return JSONResponse(status_code=200, content=_inv_json(existing))
         return JSONResponse(status_code=201, content=_inv_json(inv))
 
     @app.get("/api/v1/investigations")
@@ -119,7 +128,13 @@ def create_app(engine: Engine) -> FastAPI:
         await require_auth(request)
         if idempotency_key:
             body.idempotency_key = idempotency_key
-        branch = await engine.orchestrator.create_branch(investigation_id, body)
+        try:
+            branch = await engine.orchestrator.create_branch(investigation_id, body)
+        except asyncpg.UniqueViolationError:
+            existing = await engine.repo.find_branch_by_key(idempotency_key or "")
+            if existing is None:
+                raise
+            return JSONResponse(status_code=200, content=_branch_json(existing))
         return JSONResponse(status_code=201, content=_branch_json(branch))
 
     @app.get("/api/v1/investigations/{investigation_id}/branches")
@@ -157,14 +172,18 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/v1/investigations/{investigation_id}/events", response_model=None)
     async def stream_events(investigation_id: str, request: Request, last_event_id: int = 0):
         await require_auth(request)
-        events = await engine.repo.list_events(investigation_id, after_id=last_event_id)
         if "text/event-stream" not in request.headers.get("accept", ""):
+            events = await engine.repo.list_events(investigation_id, after_id=last_event_id)
             return [_event_json(e) for e in events]
 
+        queue = engine.bus.subscribe(investigation_id)
+        events = await engine.repo.list_events(investigation_id, after_id=last_event_id)
+
         async def stream():
-            queue = engine.bus.subscribe(investigation_id)
+            last_sent = last_event_id
             try:
                 for event in events:
+                    last_sent = max(last_sent, event.id)
                     yield _sse(event)
                 while True:
                     if await request.is_disconnected():
@@ -176,8 +195,9 @@ def create_app(engine: Engine) -> FastAPI:
                         continue
                     if event.investigation_id != investigation_id:
                         continue
-                    if event.id <= last_event_id:
+                    if event.id <= last_sent:
                         continue
+                    last_sent = event.id
                     yield _sse(event)
             finally:
                 engine.bus.unsubscribe(queue)

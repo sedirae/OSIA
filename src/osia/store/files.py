@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import time
 from dataclasses import dataclass
 
 import asyncpg
@@ -49,7 +50,8 @@ class FileStore:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        if not final.exists():
+        deduplicated = final.exists()
+        if not deduplicated:
             os.rename(incoming, final)
         else:
             incoming.unlink(missing_ok=True)
@@ -72,7 +74,7 @@ class FileStore:
                     media_type,
                     label,
                 )
-        return {"sha256": sha256, "proof_ref_id": ref["id"], "size_bytes": len(content), "deduplicated": True}
+        return {"sha256": sha256, "proof_ref_id": ref["id"], "size_bytes": len(content), "deduplicated": deduplicated}
 
     async def check_integrity(self) -> IntegrityReport:
         """Détecte les incohérences base/fichiers (CON-02 §3, OSIA-I-10).
@@ -101,9 +103,12 @@ class FileStore:
         removed = 0
         for orphan in report.orphan_files:
             path = pathlib.Path(orphan)
-            if path.exists():
-                path.unlink()
-                removed += 1
+            if not path.exists():
+                continue
+            if path.suffix == ".part" and time.time() - path.stat().st_mtime < 60:
+                continue
+            path.unlink()
+            removed += 1
         return removed
 
     def read_proof(self, sha256: str) -> bytes | None:

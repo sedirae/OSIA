@@ -94,6 +94,12 @@ class Settings:
         token = os.environ.get("OSIA_AUTH_TOKEN")
         if token:
             settings.auth_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        paid = os.environ.get("OSIA_PAID_CALLS_ENABLED", "").strip().lower()
+        if paid:
+            settings.paid_calls_enabled = paid in ("1", "true", "yes", "on")
+        cap = os.environ.get("OSIA_GLOBAL_MONTHLY_CAP_CENTS")
+        if cap:
+            settings.global_monthly_cap_cents = int(cap)
         return settings
 
 

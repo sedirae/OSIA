@@ -141,3 +141,30 @@ async def test_budget_exhaustion_stops_investigation(engine):
         engine.scheduler.stop()
         if engine._runner:
             await engine._runner
+
+
+async def test_limits_come_from_profiles_table(engine):
+    await engine.pool.execute("UPDATE profiles SET max_source_requests = 7 WHERE id = 'rapide'")
+    inv = await make_investigation(engine)
+    limits = inv["effective_limits"]
+    if isinstance(limits, str):
+        limits = json.loads(limits)
+    assert limits["max_source_requests"] == 7
+
+
+async def test_branch_depth_inherited_and_parent_checked(engine):
+    inv = await make_investigation(engine)
+    b1 = await engine.orchestrator.create_branch(
+        inv["id"], CreateBranchRequest(objective="b1", explicit_acceptance=True)
+    )
+    assert b1["depth"] == 0
+    b2 = await engine.orchestrator.create_branch(
+        inv["id"], CreateBranchRequest(objective="b2", explicit_acceptance=True, parent_branch_id=b1["id"])
+    )
+    assert b2["depth"] == 1
+    other = await make_investigation(engine, title="autre")
+    with pytest.raises(PolicyDeny):
+        await engine.orchestrator.create_branch(
+            other["id"],
+            CreateBranchRequest(objective="x", explicit_acceptance=True, parent_branch_id=b1["id"]),
+        )

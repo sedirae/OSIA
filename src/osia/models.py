@@ -69,25 +69,7 @@ class LimitSet(BaseModel):
     ai_timeout_seconds: int = Field(default=60, gt=0)
 
 
-PROFILES_V1: dict[str, dict[str, Any]] = {
-    "rapide": dict(max_rebonds=2, max_source_requests=12, max_ai_calls=4, max_duration_seconds=120, max_cost_cents=5),
-    "standard": dict(max_rebonds=4, max_source_requests=40, max_ai_calls=12, max_duration_seconds=600, max_cost_cents=20),
-    "approfondi": dict(max_rebonds=8, max_source_requests=100, max_ai_calls=30, max_duration_seconds=1800, max_cost_cents=100),
-}
-
 DEFAULT_PROFILE = "rapide"
-
-
-def resolve_limits(profile_id: str, overrides: Optional[dict[str, Any]] = None) -> LimitSet:
-    base = PROFILES_V1.get(profile_id)
-    if base is None:
-        raise ValueError(f"profil inconnu: {profile_id}")
-    merged = dict(base)
-    if overrides:
-        for key, value in overrides.items():
-            if key in LimitSet.model_fields:
-                merged[key] = value
-    return LimitSet(**merged)
 
 
 class CreateInvestigationRequest(BaseModel):

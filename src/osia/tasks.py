@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -77,8 +78,30 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     if not decision.allowed:
         raise PolicyDeny(decision.reason or "refus_politique", "source")
     await engine.policy.mark_in_flight(decision.op_id)
-    async with engine.external_semaphore:
-        result = await connector.fetch(FetchRequest(query=payload["query"]))
+    try:
+        async with engine.external_semaphore:
+            result = await asyncio.wait_for(
+                connector.fetch(FetchRequest(query=payload["query"])),
+                timeout=decision.timeout_seconds or 15,
+            )
+    except asyncio.TimeoutError as exc:
+        await engine.policy.mark_uncertain(decision.op_id)
+        await engine.bus.emit(
+            type="op.uncertain",
+            investigation_id=inv["id"],
+            branch_id=task["branch_id"],
+            payload={"op_id": decision.op_id, "error": f"timeout_source:{decision.timeout_seconds}s"},
+        )
+        raise RuntimeError(f"timeout_source:{decision.timeout_seconds}s") from exc
+    except Exception as exc:
+        await engine.policy.mark_uncertain(decision.op_id)
+        await engine.bus.emit(
+            type="op.uncertain",
+            investigation_id=inv["id"],
+            branch_id=task["branch_id"],
+            payload={"op_id": decision.op_id, "error": str(exc)},
+        )
+        raise
     proof = await engine.filestore.store_proof(
         investigation_id=inv["id"],
         content=result.content.encode("utf-8"),

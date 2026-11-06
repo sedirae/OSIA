@@ -125,7 +125,12 @@ class BudgetManager:
         provider: Optional[str] = None,
         model: Optional[str] = None,
     ) -> asyncpg.Record:
-        """Réservation transactionnelle (T8.4 étape 3) : idempotente, atomique avec le verrou de l'opération."""
+        """Réservation transactionnelle (T8.4 étape 3) : idempotente, atomique avec le verrou de l'opération.
+
+        Le contrôle de plafond est sérialisé : verrou de ligne sur l'investigation (et la
+        branche), verrou consultatif transactionnel global pour le plafond mensuel —
+        deux réservations concurrentes ne peuvent pas dépasser un plafond.
+        """
         period = _period(datetime.now(timezone.utc))
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -134,6 +139,21 @@ class BudgetManager:
                 )
                 if existing is not None:
                     return existing
+                locked = await conn.fetchrow(
+                    "SELECT id FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if locked is None:
+                    raise PolicyDeny("investigation_inconnue", "policy")
+                if branch_id:
+                    locked_branch = await conn.fetchrow(
+                        "SELECT id FROM branches WHERE id = $1 AND investigation_id = $2 FOR UPDATE",
+                        branch_id,
+                        investigation_id,
+                    )
+                    if locked_branch is None:
+                        raise PolicyDeny("branche_inconnue", "ledger")
+                if await self._paid_enabled(conn):
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('osia:budget:global_month'))")
                 caps = await self._caps(conn, investigation_id, branch_id)
                 used = await self._used(conn, investigation_id, branch_id, provider, model, period)
                 for scope, cap in caps.items():
@@ -220,9 +240,9 @@ class BudgetManager:
         async with self.pool.acquire() as conn:
             caps = await self._caps(conn, investigation_id, None)
             used = await self._used(conn, investigation_id, None, None, None, period)
-        reserved = used.get("investigation", 0) - int(
+        reserved = int(
             await self.pool.fetchval(
-                "SELECT COALESCE(SUM(amount_cents), 0) FROM ledger WHERE investigation_id = $1 AND kind = 'consumed'",
+                "SELECT COALESCE(SUM(amount_cents), 0) FROM reservations WHERE investigation_id = $1 AND state = 'reserved'",
                 investigation_id,
             ) or 0
         )
