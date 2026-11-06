@@ -21,9 +21,29 @@ async def test_recover_marks_uncertain_and_suspends(engine):
     report = await engine.scheduler.recover()
     assert report["ops_uncertain"] == 1
     assert report["investigations_suspended"] == 1
-    assert (await engine.repo.get_task(task["id"]))["state"] == "queued"
+    assert (await engine.repo.get_task(task["id"]))["state"] == "interrupted"
     assert (await engine.repo.get_op(op["id"]))["state"] == "uncertain"
     assert (await engine.repo.get_investigation(inv["id"]))["state"] == "suspended"
+
+
+async def test_resume_requeues_interrupted_tasks(engine):
+    inv = await make_investigation(engine)
+    task = await engine.repo.insert_task(investigation_id=inv["id"], kind="noop", payload={})
+    await engine.repo.set_task_state(task["id"], "running")
+    await engine.scheduler.recover()
+    assert (await engine.repo.get_task(task["id"]))["state"] == "interrupted"
+    await engine.orchestrator.resume(inv["id"])
+    assert (await engine.repo.get_task(task["id"]))["state"] == "queued"
+    assert (await engine.repo.get_investigation(inv["id"]))["state"] == "running"
+
+
+async def test_scheduler_does_not_claim_tasks_of_suspended_investigation(engine):
+    inv = await make_investigation(engine)
+    task = await engine.repo.insert_task(investigation_id=inv["id"], kind="noop", payload={})
+    await engine.repo.set_investigation_state(inv["id"], "suspended")
+    claimed = await engine.repo.claim_next_task()
+    assert claimed is None
+    assert (await engine.repo.get_task(task["id"]))["state"] == "queued"
 
 
 async def test_handler_execution_and_events(engine):

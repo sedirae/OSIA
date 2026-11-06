@@ -216,7 +216,7 @@ class Orchestrator:
 
     async def on_policy_deny(self, task: asyncpg.Record, deny: PolicyDeny) -> None:
         reason = deny.reason or ""
-        if reason in ("plafond_investigation", "plafond_branch", "plafond_global_month") or "budget" in reason or "cout_inconnu" in reason:
+        if reason.startswith(("plafond_investigation", "plafond_branch", "plafond_global_month")) or "budget" in reason or "cout_inconnu" in reason:
             await self.stop(task["investigation_id"], StopReason.BUDGET)
         elif reason in ("plafond_requetes_source_atteint", "plafond_appels_ia_atteint"):
             await self.stop(task["investigation_id"], StopReason.SOURCES)

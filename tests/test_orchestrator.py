@@ -111,3 +111,33 @@ async def test_rebonds_until_depth_limit(engine):
         engine.scheduler.stop()
         if engine._runner:
             await engine._runner
+
+
+async def test_budget_exhaustion_stops_investigation(engine):
+    from osia.ai import SimulatedAIAdapter
+
+    await engine.repo.set_setting("paid_calls_enabled", True)
+    paid = SimulatedAIAdapter(
+        provider="cloud",
+        model="payant-1",
+        scripted={"planning": {"sub_objectives": ["so1"], "source_queries": ["requete-1"]}},
+    )
+    paid.paid = True
+    paid.cost_per_call_cents = 10
+    engine.broker.adapters["payant"] = paid
+    engine.broker.role_models["planning"] = "payant"
+    engine.policy.allow_target("cloud:payant-1")
+    await engine.start()
+    try:
+        inv = await make_investigation(engine, title="budget", limits={"max_cost_cents": 5})
+        final = await wait_state(engine, inv["id"], {"stopped", "error"})
+        assert final["state"] == "stopped"
+        assert final["stop_reason"] == "budget_exhausted"
+        tasks = await engine.repo.list_tasks(inv["id"])
+        plan = [t for t in tasks if t["kind"] == "plan"]
+        assert plan and plan[0]["state"] == "failed"
+        assert "plafond" in plan[0]["error"]
+    finally:
+        engine.scheduler.stop()
+        if engine._runner:
+            await engine._runner

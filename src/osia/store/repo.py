@@ -187,8 +187,9 @@ class Repo:
             async with conn.transaction():
                 return _norm_row(await conn.fetchrow(
                     "UPDATE tasks SET state = 'claimed', started_at = now(), updated_at = now() "
-                    "WHERE id = (SELECT id FROM tasks WHERE state = 'queued' AND not_before <= now() "
-                    "ORDER BY priority DESC, created_at LIMIT 1 FOR UPDATE SKIP LOCKED) "
+                    "WHERE id = (SELECT t.id FROM tasks t JOIN investigations i ON i.id = t.investigation_id "
+                    "WHERE t.state = 'queued' AND t.not_before <= now() AND i.state = 'running' "
+                    "ORDER BY t.priority DESC, t.created_at LIMIT 1 FOR UPDATE OF t SKIP LOCKED) "
                     "RETURNING *"
                 ))
 

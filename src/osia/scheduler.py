@@ -38,8 +38,13 @@ class Scheduler:
 
     async def recover(self) -> dict[str, int]:
         """Reprise contrôlée après incident (T3.6, T4.7, OSIA-I-09) :
-        tâches interrompues remises en file, opérations externes in_flight marquées 'uncertain'
-        (jamais relancées aveuglément), investigations actives suspendues."""
+        tâches interrompues marquées 'interrupted' (remises en file uniquement par resume()),
+        opérations externes in_flight marquées 'uncertain'
+        (jamais relancées aveuglément), investigations interrompues suspendues.
+        Seules les investigations avec travail interrompu (tâche claimée/running ou
+        opération en vol) sont suspendues ; les investigations 'running' sans
+        travail en cours restent actives et leurs tâches 'queued' sont exécutables.
+        """
         async with self.pool.acquire() as conn:
             interrupted = await conn.fetch(
                 "UPDATE tasks SET state = 'interrupted', updated_at = now() "
@@ -53,13 +58,18 @@ class Scheduler:
                 "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
                 "WHERE state = 'authorized' RETURNING id, investigation_id"
             )
-            requeued = await conn.fetch(
-                "UPDATE tasks SET state = 'queued', updated_at = now() WHERE state = 'interrupted' RETURNING id, investigation_id"
-            )
-            suspended = await conn.fetch(
-                "UPDATE investigations SET state = 'suspended', stop_reason = 'crash_recovery', updated_at = now() "
-                "WHERE state = 'running' RETURNING id"
-            )
+            affected = {row["investigation_id"] for row in interrupted}
+            affected.update(row["investigation_id"] for row in ops)
+            affected.update(row["investigation_id"] for row in orphan_authorized)
+            suspended = []
+            for investigation_id in affected:
+                row = await conn.fetchrow(
+                    "UPDATE investigations SET state = 'suspended', stop_reason = 'crash_recovery', updated_at = now() "
+                    "WHERE id = $1 AND state = 'running' RETURNING id",
+                    investigation_id,
+                )
+                if row is not None:
+                    suspended.append(row)
         for row in interrupted:
             await self.bus.emit(
                 type="recovery.task_interrupted",
@@ -72,12 +82,6 @@ class Scheduler:
                 investigation_id=row["investigation_id"],
                 payload={"op_id": row["id"], "note": "jamais relancé aveuglément (OSIA-I-09)"},
             )
-        for row in requeued:
-            await self.bus.emit(
-                type="recovery.task_requeued",
-                investigation_id=row["investigation_id"],
-                payload={"task_id": row["id"]},
-            )
         for row in suspended:
             await self.bus.emit(
                 type="recovery.investigation_suspended",
@@ -88,7 +92,6 @@ class Scheduler:
             "tasks_interrupted": len(interrupted),
             "ops_uncertain": len(ops),
             "ops_authorized_cancelled": len(orphan_authorized),
-            "tasks_requeued": len(requeued),
             "investigations_suspended": len(suspended),
         }
 
