@@ -8,6 +8,19 @@ Les décisions détaillées figurent dans les lots liés. Les résumés ci-desso
 
 T1 : `EXEC-*` regroupe des principes corroborés par les lots ultérieurs et le contexte de conversation ; ces sept lignes ne prétendent pas reproduire la correspondance originale T1.1–T1.7. Voir [T1.md](../CADRAGE/LOTS/T1.md).
 
+## Périmètre de livraison V1
+
+Le porteur a validé l’ensemble des six décisions le 06/11/2026. Leurs formulations et les valeurs associées sont dans [PERIMETRE-V1.md](../CADRAGE/PERIMETRE-V1.md).
+
+| Identifiant | Objet |
+| --- | --- |
+| V1.1 | Fonctions livrées et reports |
+| V1.2 | Connecteurs initiaux |
+| V1.3 | Fournisseurs et modèles IA |
+| V1.4 | Profils, limites et arrêt |
+| V1.5 | Interopérabilité |
+| V1.6 | Charte visuelle |
+
 ## A
 
 | Identifiant | Décision / portée | Source | Contrôles associés |

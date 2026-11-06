@@ -18,4 +18,4 @@
 
 Ces contrôles vérifient le livrable documentaire. Ils ne démontrent pas la conformité d'une application et ne remplacent pas les scénarios de [RECETTE.md](RECETTE.md). Les ambiguïtés et leurs résolutions ont fait l'objet d'une relecture éditoriale dans le rapport d'audit ; la comparaison automatique de textes ne constitue pas une preuve de cohérence sémantique universelle.
 
-Limites : inventaire des fichiers accessibles uniquement ; source autonome T1 non retrouvée ; périmètre exact V1 et spécifications détaillées encore à établir. Les contrôles portent sur la documentation du cadrage.
+Limites : inventaire des fichiers accessibles uniquement ; source autonome T1 non retrouvée ; le périmètre V1 a été validé après ces contrôles et les spécifications détaillées restent à produire. Les contrôles portent sur la documentation du cadrage.

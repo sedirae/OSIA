@@ -1,6 +1,6 @@
 # OSIA — Cadre UX et conception visuelle
 
-**Édition 1.1 — 06/11/2026.** Obligations fonctionnelles acquises ; charte graphique et maquettes détaillées non arbitrées.
+**Édition 1.1 — 06/11/2026.** Obligations fonctionnelles acquises. La [charte V1 validée](PERIMETRE-V1.md#v16--charte-visuelle) guide les maquettes et composants à concevoir.
 
 ## Exigences déjà décidées
 
@@ -23,7 +23,7 @@ Les détails exhaustifs sont les 96 règles C1-01 à C7-20 réparties dans [C.md
 | Livrable | Contraintes à préserver |
 | --- | --- |
 | Maquettes des états vide, actif, limité, arrêté et erreur | Même espace ; résultats partiels et motif d'arrêt disponibles |
-| Charte graphique et composants | Aucune police, couleur de marque, dimension fixe ou framework n'est imposé ici |
+| Composants et maquettes | Appliquer la charte V1 et préciser dimensions, états et comportements responsives |
 | Panneaux, modale de paramètres et responsive | Lisibilité et maintien du contexte ; paramètres centraux et réglages par investigation distincts |
 | Accessibilité et interactions clavier | Critères et niveau cible à spécifier ; ne pas annoncer une conformité non vérifiée |
 | Vues de confiance et contradictions | Dimensions explicables ; pas de pourcentage non calibré |

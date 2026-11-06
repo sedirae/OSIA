@@ -6,7 +6,7 @@
 
 Les huit documents Markdown accessibles ont été examinés intégralement. Leurs décisions structurantes convergent. Les écarts repérés tiennent principalement aux évolutions chronologiques du stockage et de l’architecture, à des mots employés avec plusieurs sens (branche, sauvegarde, local, reprise) et à des renvois devenus obsolètes. Les harmonisations décrites ci-dessous sont intégrées aux documents actifs.
 
-Le cadrage fonctionnel et technique est clos ; il reste à produire les spécifications détaillées et le périmètre exact de V1. Aucun nouvel arbitrage de fond n’a été inventé pour combler ces travaux. Le référentiel n’utilise pas le dépôt GitHub prématuré comme autorité.
+Lors de cet audit, le cadrage fonctionnel et technique était clos. Le [périmètre de livraison V1](PERIMETRE-V1.md) a depuis été validé. Les spécifications détaillées restent à produire. Aucun nouvel arbitrage de fond n’a été inventé pour combler ces travaux. Le référentiel n’utilise pas le dépôt GitHub prématuré comme autorité.
 
 Une limite de traçabilité demeure pour **T1** : ses principes sont corroborés par les textes techniques validés, mais aucun Markdown autonome et aucune correspondance complète de la numérotation originale n’ont été retrouvés. Les sept thèmes EXEC rendent cette limite explicite. La réserve antérieure sur **T4–T8 est levée** grâce au texte complet retrouvé.
 
