@@ -19,11 +19,11 @@
 | Surveillance automatisée des anciennes investigations | A §20 | Piste V2 ; distincte de la reprise après incident |
 | Composants Rust du moteur | T3.1 | Éventuels plus tard sur besoin démontré |
 | Microservices, Redis/RabbitMQ/Celery, Neo4j, Docker | T3–T6 | Aucune obligation V1 |
-| Sauvegardes techniques planifiées | T2.5 validé, activation facultative ; D5 ne les impose pas initialement | Définir leur phasage ; ne pas requalifier le principe comme non arbitré |
+| Sauvegardes techniques planifiées | T2.5 validé, activation facultative ; D5 ne les impose pas initialement | Sauvegarde manuelle en V1. Programmation reportée (V1.1) |
 | Signature des archives | T7.2 | Facultative, calendrier non fixé |
 | Sauvegardes cloud et bibliothèques/corpus | T2 §4 | Pistes séparées à étudier, sans fournisseur ni calendrier validés |
 
-Les autres capacités font partie de la cible. Leur découpage précis entre V1 et évolutions doit être explicite et validé comme périmètre de livraison. La phrase « cible ≠ V1 » n'autorise pas les agents à supprimer des exigences ou à les différer en silence.
+Le découpage validé entre première livraison et évolutions figure dans [PERIMETRE-V1.md](PERIMETRE-V1.md). Les autres capacités font partie de la cible.
 
 ## 2. Détails à produire avant l'implémentation du domaine
 
@@ -53,10 +53,10 @@ Les choix de schéma, de nommage, de bibliothèques et de versions compatibles p
 
 ## 3. Ordre de travail conseillé, non calendrier validé
 
-Commencer par modes d'installation, persistance, contrats métier, politiques et budgets, puis une investigation verticale avec connecteurs et IA simulés. Ajouter les intégrations réelles autorisées, le graphe et la correction, puis les parcours de restitution, sauvegarde et import/export selon le périmètre choisi. Les propriétés transversales de sécurité, provenance et reprise sont conçues dès le socle et vérifiées à chaque tranche.
+Commencer par modes d'installation, persistance, contrats métier, politiques et budgets, puis une investigation verticale avec connecteurs et IA simulés. Ajouter les intégrations réelles autorisées, le graphe et la correction, puis les parcours de restitution, sauvegarde et import/export selon le périmètre validé. Les propriétés transversales de sécurité, provenance et reprise sont conçues dès le socle et vérifiées à chaque tranche.
 
 Ce séquencement est une aide de conception, pas un nouvel arbitrage de roadmap ni un ordre de démarrer le développement.
 
 ## 4. Questions réellement encore ouvertes
 
-La liste précise des fonctionnalités V1, la liste des sources et modèles initiaux, les valeurs par défaut, les spécifications d'interopérabilité et la charte visuelle restent à établir. Le détail historique de la numérotation T1.x n'est pas récupéré ; les sept thèmes EXEC documentent les principes corroborés sans changer leur fond. Il n'y a pas lieu de rouvrir Python, PostgreSQL ou les 46 décisions T4–T8.
+Les fonctions V1, le catalogue de départ, les modèles initiaux, les valeurs par défaut, les conventions d’interopérabilité et la charte sont actés dans [PERIMETRE-V1.md](PERIMETRE-V1.md). Il reste à qualifier les intégrations, spécifier les schémas et protocoles détaillés, compléter les paramètres de conception non chiffrés, produire les maquettes et découper la réalisation en tranches. Le détail historique de la numérotation T1.x n'est pas récupéré ; les sept thèmes EXEC documentent les principes corroborés sans changer leur fond. Il n'y a pas lieu de rouvrir Python, PostgreSQL ou les 46 décisions T4–T8.

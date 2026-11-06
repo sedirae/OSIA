@@ -8,7 +8,7 @@
 2. Les fichiers `LOTS/` sont les références détaillées actives. Les harmonisations consignées dans [AUDIT-COHERENCE.md](AUDIT-COHERENCE.md) y sont déjà intégrées.
 3. [FONCTIONNEL.md](FONCTIONNEL.md) et [TECHNIQUE.md](TECHNIQUE.md) sont des vues transversales des mêmes décisions ; ils ne réduisent pas les exigences détaillées.
 4. [DECISIONS.md](../COWORKAI/DECISIONS.md) est l'index de traçabilité ; [RECETTE.md](RECETTE.md) associe contrôles et exigences. Ils ne valent pas preuve d'exécution.
-5. [DESIGN.md](DESIGN.md) reprend les obligations UX acquises. Les choix visuels ouverts et les autres détails figurent dans [CONCEPTION-RESTANTE.md](CONCEPTION-RESTANTE.md).
+5. [DESIGN.md](DESIGN.md) reprend les obligations UX acquises. La charte V1 et les autres choix de livraison figurent dans [PERIMETRE-V1.md](PERIMETRE-V1.md). Les spécifications restantes sont suivies dans [CONCEPTION-RESTANTE.md](CONCEPTION-RESTANTE.md).
 
 Les sources anciennes servent à la provenance. Elles ne doivent pas être remises à côté des documents actifs comme instructions concurrentes. La consolidation provisoire et les travaux prématurés GitHub sont remplacés pour le cadrage actif. Une incohérence nouvelle doit être signalée, pas résolue en choisissant arbitrairement le fichier le plus récent.
 
@@ -39,4 +39,4 @@ Les valeurs de profils, budgets, délais, quotas et seuils non explicitement val
 
 ## Périmètre et statut
 
-Le cadre cible est clos ; le périmètre détaillé V1 n'est pas une liste déjà validée. Les fonctions explicitement initiales et les reports explicites sont conservés dans [CONCEPTION-RESTANTE.md](CONCEPTION-RESTANTE.md). L'authentification serveur ne crée pas une exigence de plateforme SaaS collaborative. L'installation Desktop n'est pas le futur client GNOME.
+Le cadre cible est clos. Les fonctions livrées et les reports sont validés dans [PERIMETRE-V1.md](PERIMETRE-V1.md). L'authentification serveur ne crée pas une exigence de plateforme SaaS collaborative. L'installation Desktop n'est pas le futur client GNOME.

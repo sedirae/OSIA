@@ -1,6 +1,6 @@
 # OSIA — Référentiel de cadrage consolidé
 
-**Édition 1.1 — 6 novembre 2026.** Cadrage fonctionnel et technique clôturé ; conception détaillée et périmètre exact de livraison V1 à établir.
+**Édition 1.1 — 6 novembre 2026.** Le cadrage fonctionnel, technique et le périmètre de livraison V1 sont validés. La conception détaillée reste à produire.
 
 OSIA est un moteur d'investigation sur sources publiques : il part d'indices et d'un objectif facultatif, conduit une recherche automatique bornée, conserve les preuves et restitue des conclusions vérifiables. L'utilisateur garde le contrôle des corrections, approfondissements, transmissions et budgets.
 
@@ -18,7 +18,8 @@ Ce dossier est le remplacement documentaire préparé à partir des cadrages pro
 | Décisions, options, sources et critères associés | [COWORKAI/DECISIONS.md](COWORKAI/DECISIONS.md) |
 | Critères d'acceptation, sans prétention de tests exécutés | [CADRAGE/RECETTE.md](CADRAGE/RECETTE.md) |
 | Écarts corrigés et limites de la vérification | [CADRAGE/AUDIT-COHERENCE.md](CADRAGE/AUDIT-COHERENCE.md) |
-| Travail restant de conception et périmètre V1 | [CADRAGE/CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md) |
+| Périmètre V1 validé et reports | [CADRAGE/PERIMETRE-V1.md](CADRAGE/PERIMETRE-V1.md) |
+| Travail restant de conception | [CADRAGE/CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md) |
 | Références exactes et empreintes des sources | [CADRAGE/SOURCES.md](CADRAGE/SOURCES.md) |
 | Intégration du cadrage sur GitHub | [COWORKAI/INTEGRATION-GITHUB.md](COWORKAI/INTEGRATION-GITHUB.md) |
 

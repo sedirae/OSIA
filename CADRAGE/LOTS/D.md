@@ -233,7 +233,7 @@ Une commande **« Exporter les deux »** permet de produire, en une opération u
 
 - **Enregistrement automatique local** des travaux : prévu par D1.
 - **Sauvegarde externe portable** : disponible manuellement dès le périmètre initial.
-- Sauvegarde technique manuelle et programmation facultative : capacité validée en T2.5, destination et rétention configurables. Son phasage exact relève du périmètre V1 à établir ; l'utilisateur n'est jamais obligé d'activer une programmation.
+- Sauvegarde technique manuelle et programmation facultative : capacité validée en T2.5, destination et rétention configurables. La [V1](../PERIMETRE-V1.md) livre la sauvegarde manuelle. La programmation facultative est reportée.
 - Ne pas présenter l'enregistrement dans PostgreSQL et le répertoire de preuves comme une sauvegarde indépendante.
 
 ### 7.4. Intégrité ≠ authenticité

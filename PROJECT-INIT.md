@@ -9,13 +9,13 @@ Construire un outil Linux d'investigation OSINT contrôlable : découverte et re
 ## Première séquence de travail
 
 1. Lire [AGENTS.md](AGENTS.md) et [CADRAGE/README.md](CADRAGE/README.md).
-2. Établir le périmètre exact de V1 à partir des engagements et exclusions déjà actés dans [CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md). Ne pas déplacer silencieusement une exigence explicitement initiale vers une version ultérieure.
+2. Lire le [périmètre V1 validé](CADRAGE/PERIMETRE-V1.md) et repérer les spécifications à produire dans [CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md).
 3. Spécifier les contrats indispensables à la tranche prévue : état d'investigation, politiques et réservations, provenance, API/événements, stockage et reprise.
 4. Définir le lot de réalisation, ses dépendances, ses critères de recette et les choix techniques encore nécessaires. Les ordres suggérés de conception ne constituent pas un calendrier validé.
 5. Après mandat de développement, implémenter la tranche, vérifier les critères associés et soumettre une PR. La revue doit pouvoir distinguer exigence, choix d'implémentation, code livré et résultat de test.
 
 ## Livrables de conception attendus
 
-Contrats et schémas versionnés ; protocole de cohérence base/fichiers ; états et règles de reprise ; politique de sécurité des modes ; contrats des connecteurs et du courtier ; protocole financier ; spécification `.osia` ; maquettes et règles d'accessibilité ; périmètre V1 et étapes de livraison.
+Contrats et schémas versionnés ; protocole de cohérence base/fichiers ; états et règles de reprise ; politique de sécurité des modes ; contrats des connecteurs et du courtier ; protocole financier ; spécification `.osia` ; maquettes et règles d'accessibilité ; découpage du périmètre V1 validé en tranches de livraison.
 
 Ne pas produire un `requirements.txt` définitif depuis les exemples des anciens documents. Les dépendances et versions découlent de la conception et seront vérifiées au moment de leur sélection.
