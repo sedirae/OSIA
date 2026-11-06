@@ -1,44 +1,33 @@
-# Cadrage design et expérience — [Nom du projet]
+# OSIA — Cadre UX et conception visuelle
 
-**Statut global :** `OUVERT` — direction visuelle et ergonomique non définie.  
-**Version / date :** à renseigner.  
-**Applicabilité :** pour un projet sans interface visuelle, adapter au parcours CLI/API ou marquer non applicable.
+**Édition 1.1 — 06/11/2026.** Obligations fonctionnelles acquises ; charte graphique et maquettes détaillées non arbitrées.
 
-## 1. Intentions et contraintes
+## Exigences déjà décidées
 
-Décrire les utilisateurs, les objectifs d'expérience, le ton, les contraintes de marque et les références pertinentes.
+- Page principale unifiée, indices et objectif facultatif en haut ; suivi puis synthèse, graphe et fiches. Pas d'assistant multipage imposé au lancement.
+- Paramètres avancés repliables ; accès central aux paramètres globaux. Le contexte et la position du graphe sont préservés à l'ouverture des détails.
+- Panneaux contextuels fermables, redimensionnables/épinglables selon pertinence ; adaptation aux petits écrans.
+- Suivi des opérations et de la consommation disponible sans faux pourcentage ni montant exact inventé.
+- Navigation depuis une conclusion vers relations, entités, preuves et dates.
+- Graphe réseau, vue des parcours et regroupements ; zoom, déplacement, fixation des nœuds, recherche, filtres et affichage progressif.
+- Liens documentés continus, hypothétiques discontinus ; contradictions distinctes ; les conventions ne doivent pas donner à une hypothèse l'apparence d'un fait.
+- Arbre des branches séparé sémantiquement du graphe relationnel. Vues par branche et consolidée ; éléments masqués distinguables des éléments absents.
+- Deux statuts distincts : étayage documentaire et décision humaine. Historique factuel séparé de l'historique des opérations OSIA.
+- Rapports consultables avant export ; aperçu du périmètre et exclusions réelles ; paramètres et budget visibles avant approfondissement.
+- Une synthèse stabilisée devenue obsolète est signalée ; son actualisation est demandée explicitement.
 
-## 2. Navigation et parcours
+Les détails exhaustifs sont les 96 règles C1-01 à C7-20 réparties dans [C.md](LOTS/C.md), complétées par A, D et T7. Ces plages ne constituent pas une numérotation continue unique.
 
-Préciser l'organisation des écrans, commandes ou interactions, les actions prioritaires et les chemins de retour/erreur.
+## Travail de conception encore nécessaire
 
-## 3. Direction graphique
+| Livrable | Contraintes à préserver |
+| --- | --- |
+| Maquettes des états vide, actif, limité, arrêté et erreur | Même espace ; résultats partiels et motif d'arrêt disponibles |
+| Charte graphique et composants | Aucune police, couleur de marque, dimension fixe ou framework n'est imposé ici |
+| Panneaux, modale de paramètres et responsive | Lisibilité et maintien du contexte ; paramètres centraux et réglages par investigation distincts |
+| Accessibilité et interactions clavier | Critères et niveau cible à spécifier ; ne pas annoncer une conformité non vérifiée |
+| Vues de confiance et contradictions | Dimensions explicables ; pas de pourcentage non calibré |
+| États de configuration et sécurité | Modes, modules, activation des fournisseurs, permissions et coûts compréhensibles |
+| Export HTML | Lecture seule, hors ligne, sélection/exclusions effectives et aucune requête automatique |
 
-| Élément | Position | Statut |
-| --- | --- | --- |
-| Typographie | À définir | `OUVERT` |
-| Palette / contrastes | À définir | `OUVERT` |
-| Composants / espacements | À définir | `OUVERT` |
-| Icônes et illustrations | À définir si nécessaire | `OUVERT` |
-
-Les valeurs d'exemple ou les maquettes exploratoires ne sont pas automatiquement validées.
-
-## 4. États et comportements
-
-Établir les comportements des états vides, chargement, réussite, erreur, indisponibilité et actions destructrices selon le projet.
-
-## 5. Responsive et accessibilité
-
-Définir les supports cibles, l'usage clavier et tactile, les contrastes, la lisibilité et les exigences d'accessibilité applicables.
-
-## 6. Maquettes et ressources
-
-Placer les maquettes de référence dans `assets/` lorsque cela a du sens, ou référencer leur emplacement externe. Préciser la version, le statut et les pages concernées.
-
-## 7. Arbitrages et validation
-
-| Sujet | Proposition / décision | Statut |
-| --- | --- | --- |
-| À compléter | Aucune charte validée dans le template | `OUVERT` |
-
-Vérifier la cohérence des parcours avec `FONCTIONNEL.md` et éviter de présupposer une bibliothèque de composants tant que `TECHNIQUE.md` ne la prévoit pas.
+Les exemples de Roadbook, Relia ou d'autres projets ne constituent pas une charte OSIA. Le futur client GNOME est distinct et différé ; il ne doit pas dicter une dépendance native au frontend web initial.
