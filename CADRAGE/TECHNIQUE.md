@@ -1,7 +1,7 @@
 # OSIA — Conception technique transversale
 
 **Version :** v0.1 — 05/11/2026  
-**Statut global :** PROPOSÉ — document de conception, non validé techniquement  
+**Statut global :** PROPOSÉ — conception transversale non validée intégralement ; **lot T1 validé** le 06/11/2026 (voir [T1-EXECUTION-DISTRIBUTION.md](T1-EXECUTION-DISTRIBUTION.md))  
 **Périmètre :** articulation des lots fonctionnels A, B, C et D ; préparation des arbitrages techniques avant développement  
 **Dépôt :** sedirae/OSIA  
 **Source de vérité des exigences :** les quatre documents de cadrage fonctionnel v1.0 validés le 05/11/2026, à importer dans ce dépôt avant approbation finale.
@@ -96,8 +96,8 @@ Le noyau est la seule autorité pour la dépense, la persistance, le lancement d
 | Cache | Stockage séparé avec TTL, invalidation par profil/source | Purge sans perte des preuves | PROPOSÉ |
 | Automatisation web | Navigateur isolé via Playwright seulement dans les modes autorisés | Pages dynamiques et contrôle d'exécution | PROPOSÉ |
 | Graphe | Bibliothèque graphique JS à sélectionner après prototype avec grands graphes | Exploration et filtrage interactifs | OUVERT |
-| Distribution | Serveur local à interface web en V1 ; habillage desktop éventuel | Éviter d'imposer trop tôt une plateforme | OUVERT (T1) |
-| Conteneurisation | Option de développement seulement, non requise pour les données utilisateur | Portabilité, simplicité | PROPOSÉ |
+| Distribution | Linux natif exclusivement ; moteur indépendant ; interface web V1 activable ; client GNOME/Rust ultérieur | Modes poste/serveur et interfaces indépendants | **VALIDÉ (T1.1–T1.7)** |
+| Conteneurisation | Aucune distribution conteneurisée officielle en V1 ; outils internes de développement non prescrits | Installation Linux native choisie | **VALIDÉ (T1.3)** |
 
 **Non-retenu par défaut :** cloud obligatoire, comptes externes imposés, synchronisation implicite, microservices/Redis/broker pour une instance mono-utilisateur, base graphe distante ou SaaS d'analytique. Ce ne sont pas des interdictions futures ; chaque ajout nécessiterait un besoin avéré.
 
@@ -114,6 +114,12 @@ Le noyau est la seule autorité pour la dépense, la persistance, le lancement d
 - **tests/contracts :** jeux de données factices, connecteurs simulés et non-régression.
 
 Dépendance voulue : les adaptateurs dépendent des interfaces du domaine ; le domaine ne connaît pas les adaptateurs.
+
+### 3.3 Choix d'exécution et de distribution **VALIDÉS** (lot T1)
+
+Le lot **T1 — Architecture d'exécution et distribution** a été clôturé le 06/11/2026 : moteur Linux natif indépendant du frontend ; frontend web V1 activable ; client natif GNOME en Rust/GTK 4/gtk-rs/libadwaita **reporté** ; installation native unifiée avec configuration poste/serveur ; API REST + SSE ; mises à jour manuelles avec notifications ; accès distant activable explicitement et protégé. **Ne pas assimiler « frontend web désactivé » à « API désactivée ».**
+
+Les décisions détaillées, limites de la V1, points non arbitrés et critères de recette sont la source de vérité de ce lot : **[T1-EXECUTION-DISTRIBUTION.md](T1-EXECUTION-DISTRIBUTION.md)**. Les technologies proposées par ailleurs dans ce document restent des hypothèses tant qu'un arbitrage distinct ne les valide pas.
 
 ## 4. Cycle d'investigation
 
@@ -340,7 +346,7 @@ Chaque étape est une **proposition de séquencement**, pas une date ni une auto
 
 | ID | Arbitrage | Options à comparer | Statut |
 | --- | --- | --- | --- |
-| T1 | Mode de distribution et d'exécution | Application web locale ; application desktop intégrée ; cœur local + habillage facultatif | OUVERT |
+| T1 | [Exécution et distribution](T1-EXECUTION-DISTRIBUTION.md) | Linux natif, modes poste/serveur, frontend web V1, GTK ultérieur, REST + SSE, mises à jour manuelles | **VALIDÉ** |
 | T2 | Stockage et sauvegarde | SQLite + blobs ; variantes de bases locales ; stratégie de chiffrement au repos | OUVERT |
 | T3 | Langage et structure du noyau | Python modulaire ; TypeScript intégral ; noyau polyglotte | OUVERT |
 | T4 | Orchestrateur durable | File transactionnelle maison contrôlée ; framework d'orchestration ; broker séparé | OUVERT |
@@ -349,7 +355,7 @@ Chaque étape est une **proposition de séquencement**, pas une date ni une auto
 | T7 | Formats .osia, HTML autonome et chiffrement | Schéma, compatibilité, restauration, rendu hors ligne | OUVERT |
 | T8 | Contrats IA et gouverneur de coûts | Estimation prudente, tarifications, renouvellement des clés, profils et quotas | OUVERT |
 
-**Premier arbitrage recommandé : T1.** Il détermine l'isolation, le packaging, l'authentification locale, le mode de mise à jour et la distribution ; les autres arbitrages peuvent ensuite s'affiner sans remettre en cause le modèle métier.
+**T1 clôturé et validé.** Les détails restant ouverts dans son document (format de paquet, authentification, TLS, etc.) ne remettent pas en cause les choix de principe. Les arbitrages structurants T2–T8 restent ouverts.
 
 ## 13. Conditions pour valider une v1.0 technique
 
