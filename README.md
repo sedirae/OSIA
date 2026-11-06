@@ -1,40 +1,31 @@
-# AI-first Project Template
+# OSIA — Référentiel de cadrage consolidé
 
-Modèle documentaire et organisationnel **agnostique des technologies et des fournisseurs d'IA** pour lancer et faire évoluer des projets GitHub avec plusieurs agents.
+**Édition 1.1 — 6 novembre 2026.** Cadrage fonctionnel et technique clôturé ; conception détaillée et périmètre exact de livraison V1 à établir.
 
-> **Ce dépôt est un template, pas une application.** Les cadrages sont volontairement non remplis. Ne pas interpréter les exemples, rubriques ou champs à compléter comme des décisions validées.
+OSIA est un moteur d'investigation sur sources publiques : il part d'indices et d'un objectif facultatif, conduit une recherche automatique bornée, conserve les preuves et restitue des conclusions vérifiables. L'utilisateur garde le contrôle des corrections, approfondissements, transmissions et budgets.
 
-## Démarrer un nouveau projet
+Ce dossier est le remplacement documentaire préparé à partir des cadrages produits dans ChatGPT. Aucun contenu du dépôt GitHub existant n'a été utilisé comme autorité. Les fichiers fournis sont destinés à devenir les références actives ; ils ne décrivent pas une application déjà développée.
 
-1. Créer le dépôt du projet à partir de ce modèle (fonction **Use this template** si ce dépôt est configuré comme template GitHub), ou reprendre son contenu de manière contrôlée.
-2. Discuter librement du projet avec un agent, éventuellement dans plusieurs conversations.
-3. Lorsqu'il est temps de formaliser le projet, demander à l'agent d'appliquer [PROJECT-INIT.md](PROJECT-INIT.md) en mode **INITIALISATION**, avec les sources auxquelles il a réellement accès.
-4. Valider les arbitrages importants. L'agent complète le cadrage, prépare les premières missions et propose une **PR**.
-5. Une fois le cadrage validé et intégré par l'utilisateur, commencer le développement selon [AGENTS.md](AGENTS.md).
+## Commencer ici
 
-Pour une fonctionnalité nouvelle, demander le mode **ÉVOLUTION** ; pour un changement de décision existante, le mode **RÉVISION**.
-
-## Où sont les informations ?
-
-| Chemin | Fonction |
+| Besoin | Document |
 | --- | --- |
-| [AGENTS.md](AGENTS.md) | Règles stables de collaboration, autonomie et escalade |
-| [PROJECT-INIT.md](PROJECT-INIT.md) | Procédure INITIALISATION / ÉVOLUTION / RÉVISION |
-| [CADRAGE/](CADRAGE/README.md) | Références fonctionnelles, techniques et design |
-| [roadmap/](roadmap/README.md) | Spécifications des évolutions fonctionnelles |
-| [COWORKAI/](COWORKAI/README.md) | Missions, rapports et décisions vivantes |
-| [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md) | Support des revues et des validations |
+| Règles pour un agent de développement | [AGENTS.md](AGENTS.md) |
+| Démarrage de la conception et limites du mandat | [PROJECT-INIT.md](PROJECT-INIT.md) |
+| Hiérarchie documentaire et index des douze lots | [CADRAGE/README.md](CADRAGE/README.md) |
+| Vue fonctionnelle transversale | [CADRAGE/FONCTIONNEL.md](CADRAGE/FONCTIONNEL.md) |
+| Architecture technique retenue | [CADRAGE/TECHNIQUE.md](CADRAGE/TECHNIQUE.md) |
+| Décisions, options, sources et critères associés | [COWORKAI/DECISIONS.md](COWORKAI/DECISIONS.md) |
+| Critères d'acceptation, sans prétention de tests exécutés | [CADRAGE/RECETTE.md](CADRAGE/RECETTE.md) |
+| Écarts corrigés et limites de la vérification | [CADRAGE/AUDIT-COHERENCE.md](CADRAGE/AUDIT-COHERENCE.md) |
+| Travail restant de conception et périmètre V1 | [CADRAGE/CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md) |
+| Références exactes et empreintes des sources | [CADRAGE/SOURCES.md](CADRAGE/SOURCES.md) |
+| Intégration du cadrage sur GitHub | [COWORKAI/INTEGRATION-GITHUB.md](COWORKAI/INTEGRATION-GITHUB.md) |
 
-Les dossiers `COWORKAI/missions/`, `COWORKAI/rapports/` et `CADRAGE/assets/` sont disponibles comme emplacements facultatifs. Les workflows CI et le code applicatif sont ajoutés **selon le projet**, pas imposés par ce template.
+## Ce que signifie « définitif »
 
-## Principes
+Les décisions de cadrage sont consolidées, sans rouvrir les arbitrages ni choisir à la place du porteur de projet des frameworks, des fournisseurs ou des valeurs par défaut. Les lots détaillés restent la référence ; les vues transversales facilitent leur utilisation. Les choix encore nécessaires à l'implémentation sont explicitement isolés.
 
-- Une IA peut **proposer**, mais ne doit pas inventer de décisions validées.
-- Les informations durables vivent dans le cadrage, les tâches dans `COWORKAI/`, les spécifications dans `roadmap/`.
-- Chaque travail significatif doit être **vérifiable** : tests réels, limites et liens Git.
-- **Aucun merge dans `main`, déploiement ou opération sensible par défaut** : l'autorisation de l'utilisateur reste nécessaire.
-- Une modification du template **ne synchronise pas automatiquement** ses copies dans les projets créés. Les futures mises à jour seront à étudier séparément, idéalement via PR.
+Huit Markdown ont été retrouvés et examinés intégralement. Les 101 arbitrages numérotés A–D et T2–T8 sont tracés, ainsi que les 96 règles détaillées de C et les 69 critères de recette fonctionnelle d'origine. T1 est consolidé en sept thèmes `EXEC-01` à `EXEC-07`, sur la base des rappels présents dans les textes validés et des décisions de conversation retrouvées. Sa numérotation originale T1.1–T1.7 n'est pas présentée comme reconstituée à l'identique.
 
-## État du modèle
-
-Première proposition à relire ; elle contient la procédure `PROJECT-INIT.md` **v0.3** et des fichiers de cadrage génériques. Aucune stack applicative, CI ou infrastructure de production n'est prévue dans cette version.
+La consolidation provisoire antérieure est remplacée. Le texte complet T4–T8 a été retrouvé ; sa réserve de couverture n'est plus applicable. L'audit indique la limite documentaire propre à T1.
