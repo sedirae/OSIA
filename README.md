@@ -12,14 +12,15 @@ OSIA vise à accélérer la recherche sur des sources publiques : découverte et
 - **Lot B — Sources et connecteurs :** B1–B7 validés ; Markdown consolidé v1.0 à importer.
 - **Lot C — Interface et restitution :** C1–C7 validés ; Markdown consolidé v1.0 à importer.
 - **Lot D — Paramètres et données locales :** D1–D7 validés ; Markdown consolidé v1.0 à importer.
-- **Conception technique transversale :** document **PROPOSÉ v0.1** dans [CADRAGE/TECHNIQUE.md](CADRAGE/TECHNIQUE.md). Il ne devient applicable qu'après revue des quatre textes de référence et arbitrage technique.
+- **Conception technique transversale :** document **PROPOSÉ v0.1** dans [CADRAGE/TECHNIQUE.md](CADRAGE/TECHNIQUE.md) ; le **lot T1 (exécution et distribution) est VALIDÉ v1.0** dans [CADRAGE/T1-EXECUTION-DISTRIBUTION.md](CADRAGE/T1-EXECUTION-DISTRIBUTION.md). Les autres choix restent à arbitrer.
 
 ## Références du dépôt
 
 | Fichier | Rôle | État actuel |
 | --- | --- | --- |
 | [CADRAGE/README.md](CADRAGE/README.md) | Index du cadrage et suivi documentaire | Adapté à OSIA |
-| [CADRAGE/TECHNIQUE.md](CADRAGE/TECHNIQUE.md) | Architecture et conception transversale | PROPOSÉ v0.1 |
+| [CADRAGE/TECHNIQUE.md](CADRAGE/TECHNIQUE.md) | Architecture et conception transversale | PROPOSÉ v0.1 (T1 validé) |
+| [CADRAGE/T1-EXECUTION-DISTRIBUTION.md](CADRAGE/T1-EXECUTION-DISTRIBUTION.md) | Décisions d'exécution, installation et distribution Linux | **VALIDÉ v1.0** |
 | [CADRAGE/FONCTIONNEL.md](CADRAGE/FONCTIONNEL.md) | Point d'entrée du fonctionnel | **Trame template non normative**, dans l'attente de l'import A–D |
 | [CADRAGE/DESIGN.md](CADRAGE/DESIGN.md) | Design et expérience | **Trame template non normative**, dans l'attente de sa personnalisation |
 | [AGENTS.md](AGENTS.md) | Règles stables de collaboration avec les agents | Template à personnaliser |
@@ -34,4 +35,4 @@ OSIA vise à accélérer la recherche sur des sources publiques : découverte et
 - Toute évolution sur branche de travail, tests réellement effectués et pull request ; la fusion dans main relève de l'utilisateur.
 - Les secrets, données sensibles, dépenses API et opérations irréversibles font l'objet de garde-fous et d'autorisations explicites.
 
-**Étape suivante :** intégrer fidèlement les quatre Markdown A–D v1.0 puis ouvrir les arbitrages techniques transversaux T1–T8, en commençant par le mode d'exécution/distribution.
+**Étape suivante :** importer fidèlement les quatre Markdown fonctionnels A–D v1.0, puis poursuivre les arbitrages techniques T2–T8 (T1 étant validé).
