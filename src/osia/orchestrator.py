@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Optional
+
+import asyncpg
+
+from .events import EventBus
+from .ids import new_id
+from .models import (
+    CreateBranchRequest,
+    CreateInvestigationRequest,
+    InvestigationState,
+    PolicyDeny,
+    StopReason,
+    resolve_limits,
+)
+from .policies.limits import limits_from_record
+from .store.repo import Repo, _norm_row
+
+
+class Orchestrator:
+    """Machine à états des investigations et branches (CON-03, T3.4, T4.3, T4.6).
+
+    L'IA propose (via tâches), le moteur autorise (PolicyEngine) ; l'arrêt sur objectif
+    étayé est automatique, toute prolongation exige une branche avec validation explicite.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, repo: Repo, bus: EventBus):
+        self.pool = pool
+        self.repo = repo
+        self.bus = bus
+
+    async def start_investigation(self, req: CreateInvestigationRequest) -> asyncpg.Record:
+        if req.idempotency_key:
+            existing = await self.repo.find_investigation_by_key(req.idempotency_key)
+            if existing is not None:
+                return existing
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                profile = await conn.fetchrow("SELECT * FROM profiles WHERE id = $1", req.profile_id)
+                if profile is None:
+                    raise PolicyDeny(f"profil_inconnu:{req.profile_id}", "policy")
+                limits = resolve_limits(req.profile_id, req.limits)
+                inv = _norm_row(
+                    await conn.fetchrow(
+                        "INSERT INTO investigations (id, title, objective, hints, profile_id, effective_limits, state, idempotency_key) "
+                        "VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb, 'running', $7) RETURNING *",
+                        new_id("inv"),
+                        req.title,
+                        req.objective,
+                        json.dumps(req.hints, ensure_ascii=False),
+                        req.profile_id,
+                        json.dumps(limits.model_dump(), ensure_ascii=False),
+                        req.idempotency_key,
+                    )
+                )
+                branch = _norm_row(
+                    await conn.fetchrow(
+                        "INSERT INTO branches (id, investigation_id, objective, effective_limits, state, depth) "
+                        "VALUES ($1, $2, $3, $4::jsonb, 'running', 0) RETURNING *",
+                        new_id("br"),
+                        inv["id"],
+                        req.objective or req.title,
+                        json.dumps(limits.model_dump(), ensure_ascii=False),
+                    )
+                )
+                await conn.execute(
+                    "INSERT INTO tasks (id, investigation_id, branch_id, kind, payload, depth, priority) "
+                    "VALUES ($1, $2, $3, 'plan', $4::jsonb, 0, 100)",
+                    new_id("task"),
+                    inv["id"],
+                    branch["id"],
+                    json.dumps({"objective": inv["objective"], "hints": req.hints}, ensure_ascii=False),
+                )
+        await self.bus.emit(
+            type="investigation.created",
+            investigation_id=inv["id"],
+            payload={"title": inv["title"], "profile": inv["profile_id"]},
+        )
+        await self.bus.emit(
+            type="investigation.started",
+            investigation_id=inv["id"],
+            branch_id=branch["id"],
+            payload={"limits": limits.model_dump()},
+        )
+        return inv
+
+    async def create_branch(self, investigation_id: str, req: CreateBranchRequest) -> asyncpg.Record:
+        """Branche d'approfondissement : jamais lancée sans validation explicite (T4.3, V1.1),
+        et ses plafonds ne peuvent dépasser ceux de l'investigation parente (D3.5)."""
+        if req.idempotency_key:
+            existing = await self.repo.find_branch_by_key(req.idempotency_key)
+            if existing is not None:
+                return existing
+        if not req.explicit_acceptance:
+            raise PolicyDeny("validation_explicite_requise", "branche")
+        inv = await self.repo.get_investigation(investigation_id)
+        if inv is None:
+            raise PolicyDeny("investigation_inconnue", "branche")
+        inv_limits = limits_from_record(inv)
+        branch_limits = resolve_limits(inv["profile_id"], req.limits)
+        for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
+            if getattr(branch_limits, field) > getattr(inv_limits, field):
+                raise PolicyDeny(f"plafond_branche_superieur:{field}", "branche")
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                branch = _norm_row(
+                    await conn.fetchrow(
+                        "INSERT INTO branches (id, investigation_id, parent_branch_id, objective, effective_limits, state, depth, idempotency_key) "
+                        "VALUES ($1, $2, $3, $4, $5::jsonb, 'running', 0, $6) RETURNING *",
+                        new_id("br"),
+                        investigation_id,
+                        req.parent_branch_id,
+                        req.objective,
+                        json.dumps(branch_limits.model_dump(), ensure_ascii=False),
+                        req.idempotency_key,
+                    )
+                )
+                await conn.execute(
+                    "INSERT INTO tasks (id, investigation_id, branch_id, kind, payload, depth, priority) "
+                    "VALUES ($1, $2, $3, 'plan', $4::jsonb, 0, 100)",
+                    new_id("task"),
+                    investigation_id,
+                    branch["id"],
+                    json.dumps({"objective": req.objective}, ensure_ascii=False),
+                )
+        await self.bus.emit(
+            type="branch.created",
+            investigation_id=investigation_id,
+            branch_id=branch["id"],
+            payload={"objective": req.objective, "limits": branch_limits.model_dump()},
+        )
+        return branch
+
+    async def stop(self, investigation_id: str, reason: StopReason) -> asyncpg.Record:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = _norm_row(
+                    await conn.fetchrow(
+                        "UPDATE investigations SET state = 'stopped', stop_reason = $2, updated_at = now() "
+                        "WHERE id = $1 AND state IN ('running','suspended') RETURNING *",
+                        investigation_id,
+                        reason.value,
+                    )
+                )
+                if inv is None:
+                    inv = await self.repo.get_investigation(investigation_id)
+                await conn.execute(
+                    "UPDATE branches SET state = 'stopped', stop_reason = $2, updated_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('running','suspended')",
+                    investigation_id,
+                    reason.value,
+                )
+                await conn.execute(
+                    "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
+                    investigation_id,
+                )
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('reserved','in_flight')",
+                    investigation_id,
+                )
+        if inv is not None:
+            await self.bus.emit(
+                type="investigation.stopped",
+                investigation_id=investigation_id,
+                payload={"reason": reason.value},
+            )
+        return inv
+
+    async def suspend(self, investigation_id: str) -> asyncpg.Record:
+        inv = await self.repo.set_investigation_state(investigation_id, InvestigationState.SUSPENDED.value)
+        await self.pool.execute(
+            "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
+            investigation_id,
+        )
+        await self.pool.execute(
+            "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('reserved','in_flight')",
+            investigation_id,
+        )
+        await self.bus.emit(type="investigation.suspended", investigation_id=investigation_id, payload={})
+        return inv
+
+    async def resume(self, investigation_id: str) -> asyncpg.Record:
+        """Reprise : vérifie l'état, ne relance jamais aveuglément les opérations incertaines (D7.4, OSIA-I-09)."""
+        inv = await self.repo.get_investigation(investigation_id)
+        if inv is None:
+            raise PolicyDeny("investigation_inconnue", "reprise")
+        if inv["state"] != InvestigationState.SUSPENDED.value:
+            raise PolicyDeny(f"reprise_impossible:{inv['state']}", "reprise")
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = _norm_row(
+                    await conn.fetchrow(
+                        "UPDATE investigations SET state = 'running', stop_reason = NULL, updated_at = now() "
+                        "WHERE id = $1 RETURNING *",
+                        investigation_id,
+                    )
+                )
+                await conn.execute(
+                    "UPDATE branches SET state = 'running', stop_reason = NULL, updated_at = now() "
+                    "WHERE investigation_id = $1 AND state = 'suspended'",
+                    investigation_id,
+                )
+                await conn.execute(
+                    "UPDATE tasks SET state = 'queued', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state = 'interrupted'",
+                    investigation_id,
+                )
+        await self.bus.emit(type="investigation.resumed", investigation_id=investigation_id, payload={})
+        return inv
+
+    async def on_policy_deny(self, task: asyncpg.Record, deny: PolicyDeny) -> None:
+        reason = deny.reason or ""
+        if reason in ("plafond_investigation", "plafond_branch", "plafond_global_month") or "budget" in reason or "cout_inconnu" in reason:
+            await self.stop(task["investigation_id"], StopReason.BUDGET)
+        elif reason in ("plafond_requetes_source_atteint", "plafond_appels_ia_atteint"):
+            await self.stop(task["investigation_id"], StopReason.SOURCES)
+
+    async def on_task_succeeded(self, task: asyncpg.Record, result: dict[str, Any]) -> None:
+        return None
