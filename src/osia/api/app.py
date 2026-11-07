@@ -187,6 +187,8 @@ def create_app(engine: Engine) -> FastAPI:
     ) -> dict:
         await require_auth(request)
         await _require_investigation(engine, investigation_id)
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
         entities = await engine.graph.list_entities(investigation_id, limit=limit, offset=offset)
         relations = await engine.graph.list_relations(investigation_id, branch_id=branch_id)
         return {

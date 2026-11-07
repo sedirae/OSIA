@@ -182,13 +182,9 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
     proof_rows = await engine.repo.list_proof_refs(inv["id"])
     proof_ids = []
     for source in synthesis.decisive_sources:
-        matched = [
-            r["id"]
-            for r in proof_rows
-            if r["source_url"]
-            and (r["source_url"] == source or source in r["source_url"] or r["source_url"] in source)
-        ]
+        matched = [r["id"] for r in proof_rows if r["source_url"] and r["source_url"] == source]
         proof_ids.extend(matched)
+    proof_ids = list(dict.fromkeys(proof_ids))
     support_map = {
         "documenté": SupportLevel.DOCUMENTE,
         "corroboré": SupportLevel.CORROBORE,

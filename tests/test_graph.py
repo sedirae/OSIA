@@ -255,3 +255,88 @@ async def test_api_graph_endpoints(engine):
         assert r.json()["etaye"] is True
         r = await client.get(f"/api/v1/investigations/inconnu/graph")
         assert r.status_code == 404
+
+
+async def test_undo_validate_restores_validation_dimension(engine):
+    inv = await make_investigation(engine)
+    branch = await first_branch(engine, inv["id"])
+    a = await engine.graph.add_assertion(inv["id"], branch_id=branch["id"], statement="S", decisive=True)
+    dec = await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="validate")
+    row = await engine.pool.fetchrow("SELECT * FROM assertions WHERE id = $1", a["id"])
+    conf = row["confidence"] if isinstance(row["confidence"], dict) else __import__("json").loads(row["confidence"])
+    assert row["human_decision"] == "validated"
+    assert conf["validation_humaine"] == "haute"
+    with pytest.raises(PolicyDeny):
+        await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="reject")
+    await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="undo", reverts=dec["id"])
+    row = await engine.pool.fetchrow("SELECT * FROM assertions WHERE id = $1", a["id"])
+    conf = row["confidence"] if isinstance(row["confidence"], dict) else __import__("json").loads(row["confidence"])
+    assert row["human_decision"] == "unexamined"
+    assert conf["validation_humaine"] == "inconnue"
+
+
+async def test_undo_reject_match_restores_previous_support_levels(engine):
+    inv = await make_investigation(engine)
+    a = await engine.graph.upsert_entity(inv["id"], kind="organisation", data={"name": "A"}, identifiers={"siren": "1"})
+    b = await engine.graph.upsert_entity(inv["id"], kind="organisation", data={"name": "B"}, identifiers={"siren": "2"})
+    prop = await engine.graph.propose_match(inv["id"], entity_a=a["entity_id"], entity_b=b["entity_id"], basis=MatchBasis.CROSS_REFERENCE)
+    rel = await engine.graph.add_relation(
+        inv["id"], branch_id=None, src_id=a["entity_id"], dst_id=b["entity_id"], type="capitalise",
+        support_level=SupportLevel.CORROBORE, match_proposal_id=prop["id"], derivation="ia",
+    )
+    dec = await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="reject")
+    row = await engine.pool.fetchrow("SELECT support_level FROM relations WHERE id = $1", rel["id"])
+    assert row["support_level"] == "a_confirmer"
+    await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="undo", reverts=dec["id"])
+    row = await engine.pool.fetchrow("SELECT support_level FROM relations WHERE id = $1", rel["id"])
+    assert row["support_level"] == "corrobore"
+
+
+async def test_merge_and_decisions_rejected_on_already_decided_proposal(engine):
+    inv = await make_investigation(engine)
+    a = await engine.graph.upsert_entity(inv["id"], kind="personne", data={"name": "X"}, identifiers={"passeport": "X1"})
+    b = await engine.graph.upsert_entity(inv["id"], kind="personne", data={"name": "Y"}, identifiers={"passeport": "Y1"})
+    prop = await engine.graph.propose_match(inv["id"], entity_a=a["entity_id"], entity_b=b["entity_id"], basis=MatchBasis.SIMILARITY)
+    dec = await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="reject")
+    with pytest.raises(PolicyDeny):
+        await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="merge")
+    with pytest.raises(PolicyDeny):
+        await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="validate")
+    row = await engine.pool.fetchrow("SELECT merged_into FROM entities WHERE id = $1", b["entity_id"])
+    assert row["merged_into"] is None
+    await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="undo", reverts=dec["id"])
+    merge = await engine.graph.decide(inv["id"], target_type="match_proposal", target_id=prop["id"], action="merge")
+    row = await engine.pool.fetchrow("SELECT merged_into FROM entities WHERE id = $1", b["entity_id"])
+    assert row["merged_into"] == a["entity_id"]
+
+
+async def test_undo_blocked_when_later_decision_exists(engine):
+    inv = await make_investigation(engine)
+    branch = await first_branch(engine, inv["id"])
+    a = await engine.graph.add_assertion(inv["id"], branch_id=branch["id"], statement="S", decisive=True)
+    first = await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="reject")
+    await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="undo", reverts=first["id"])
+    second = await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="validate")
+    await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="undo", reverts=second["id"])
+    with pytest.raises(PolicyDeny):
+        await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="undo", reverts=first["id"])
+    row = await engine.pool.fetchrow("SELECT human_decision FROM assertions WHERE id = $1", a["id"])
+    assert row["human_decision"] == "unexamined"
+
+
+async def test_undo_correct_deactivates_correction(engine):
+    inv = await make_investigation(engine)
+    branch = await first_branch(engine, inv["id"])
+    a = await engine.graph.add_assertion(inv["id"], branch_id=branch["id"], statement="Original", decisive=True)
+    dec = await engine.graph.decide(
+        inv["id"], target_type="assertion", target_id=a["id"], action="correct",
+        payload={"statement": "Corrige", "support_level": "documente"},
+    )
+    correction_id = dec["payload"]["correction_id"]
+    await engine.graph.decide(inv["id"], target_type="assertion", target_id=a["id"], action="undo", reverts=dec["id"])
+    orig = await engine.pool.fetchrow("SELECT * FROM assertions WHERE id = $1", a["id"])
+    correction = await engine.pool.fetchrow("SELECT * FROM assertions WHERE id = $1", correction_id)
+    assert orig["superseded_by"] is None
+    assert correction["superseded_by"] == a["id"]
+    active = await engine.graph.list_assertions(inv["id"])
+    assert len(active) == 1 and active[0]["statement"] == "Original"

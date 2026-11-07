@@ -16,6 +16,7 @@ from ..models import (
     DecisionTargetType,
     HumanDecision,
     MatchBasis,
+    MatchStatus,
     PolicyDeny,
     SupportLevel,
 )
@@ -100,6 +101,7 @@ class GraphService:
         matched = "created"
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", investigation_id)
                 for scheme, value in normalized.items():
                     row = await conn.fetchrow(
                         "SELECT entity_id FROM entity_identifiers WHERE investigation_id = $1 AND scheme = $2 AND value_normalisee = $3",
@@ -330,31 +332,33 @@ class GraphService:
         basis_value = basis.value if isinstance(basis, MatchBasis) else str(basis)
         conf_value = confidence.value if isinstance(confidence, ConfidenceLevel) else str(confidence)
         async with self.pool.acquire() as conn:
-            for eid in (entity_a, entity_b):
-                if not await self._entity_exists(conn, investigation_id, eid):
-                    raise PolicyDeny(f"entite_inconnue:{eid}", "graphe")
-            existing = await conn.fetchrow(
-                "SELECT * FROM match_proposals WHERE investigation_id = $1 AND status = 'proposed' "
-                "AND ((entity_a = $2 AND entity_b = $3) OR (entity_a = $3 AND entity_b = $2))",
-                investigation_id,
-                entity_a,
-                entity_b,
-            )
-            if existing is not None:
-                return _norm_row(existing)
-            row = _norm_row(
-                await conn.fetchrow(
-                    "INSERT INTO match_proposals (id, investigation_id, entity_a, entity_b, basis, justification, confidence, status) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, 'proposed') RETURNING *",
-                    new_id("match"),
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", investigation_id)
+                for eid in (entity_a, entity_b):
+                    if not await self._entity_exists(conn, investigation_id, eid):
+                        raise PolicyDeny(f"entite_inconnue:{eid}", "graphe")
+                existing = await conn.fetchrow(
+                    "SELECT * FROM match_proposals WHERE investigation_id = $1 AND status = 'proposed' "
+                    "AND ((entity_a = $2 AND entity_b = $3) OR (entity_a = $3 AND entity_b = $2))",
                     investigation_id,
                     entity_a,
                     entity_b,
-                    basis_value,
-                    justification,
-                    conf_value,
                 )
-            )
+                if existing is not None:
+                    return _norm_row(existing)
+                row = _norm_row(
+                    await conn.fetchrow(
+                        "INSERT INTO match_proposals (id, investigation_id, entity_a, entity_b, basis, justification, confidence, status) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, 'proposed') RETURNING *",
+                        new_id("match"),
+                        investigation_id,
+                        entity_a,
+                        entity_b,
+                        basis_value,
+                        justification,
+                        conf_value,
+                    )
+                )
         await self.bus.emit(
             type="match.proposed",
             investigation_id=investigation_id,
@@ -400,28 +404,71 @@ class GraphService:
                 if act in (DecisionAction.VALIDATE, DecisionAction.REJECT):
                     hd = HumanDecision.VALIDATED.value if act == DecisionAction.VALIDATE else HumanDecision.REJECTED.value
                     if ttype == DecisionTargetType.ASSERTION:
-                        await conn.execute(
-                            "UPDATE assertions SET human_decision = $2, confidence = jsonb_set(coalesce(confidence,'{}'::jsonb), '{validation_humaine}', to_jsonb($2::text)), updated_at = now() "
-                            "WHERE id = $1 AND investigation_id = $3",
-                            target_id, hd, investigation_id,
+                        current = await conn.fetchrow(
+                            "SELECT human_decision, confidence FROM assertions WHERE id = $1 AND investigation_id = $2",
+                            target_id, investigation_id,
                         )
+                        if current is None:
+                            raise PolicyDeny(f"assertion_inconnue:{target_id}", "graphe")
+                        if current["human_decision"] != HumanDecision.UNEXAMINED.value:
+                            raise PolicyDeny("decision_deja_prise_utiliser_undo", "graphe")
+                        prev_conf = current["confidence"] if isinstance(current["confidence"], dict) else json.loads(current["confidence"] or "{}")
+                        previous_validation = prev_conf.get("validation_humaine", ConfidenceLevel.INCONNUE.value)
+                        hd_conf = ConfidenceLevel.HAUTE.value if act == DecisionAction.VALIDATE else ConfidenceLevel.FAIBLE.value
+                        await conn.execute(
+                            "UPDATE assertions SET human_decision = $2, confidence = jsonb_set(coalesce(confidence,'{}'::jsonb), '{validation_humaine}', to_jsonb($4::text)), updated_at = now() "
+                            "WHERE id = $1 AND investigation_id = $3",
+                            target_id, hd, investigation_id, hd_conf,
+                        )
+                        await conn.execute(
+                            "UPDATE decisions SET payload = payload || $2::jsonb WHERE id = $1",
+                            decision["id"], _j({"previous_validation": previous_validation}),
+                        )
+                        decision["payload"] = {**decision["payload"], "previous_validation": previous_validation}
                     elif ttype == DecisionTargetType.RELATION:
+                        current = await conn.fetchrow(
+                            "SELECT human_decision FROM relations WHERE id = $1 AND investigation_id = $2",
+                            target_id, investigation_id,
+                        )
+                        if current is None:
+                            raise PolicyDeny(f"relation_inconnue:{target_id}", "graphe")
+                        if current["human_decision"] != HumanDecision.UNEXAMINED.value:
+                            raise PolicyDeny("decision_deja_prise_utiliser_undo", "graphe")
                         await conn.execute(
                             "UPDATE relations SET human_decision = $2, updated_at = now() WHERE id = $1 AND investigation_id = $3",
                             target_id, hd, investigation_id,
                         )
                     elif ttype == DecisionTargetType.MATCH_PROPOSAL:
+                        prop = await conn.fetchrow(
+                            "SELECT status FROM match_proposals WHERE id = $1 AND investigation_id = $2",
+                            target_id, investigation_id,
+                        )
+                        if prop is None:
+                            raise PolicyDeny(f"proposition_inconnue:{target_id}", "graphe")
+                        if prop["status"] != MatchStatus.PROPOSED.value:
+                            raise PolicyDeny("proposition_deja_traitee_utiliser_undo", "graphe")
                         await conn.execute(
                             "UPDATE match_proposals SET status = $2, decided_by = $3, updated_at = now() WHERE id = $1 AND investigation_id = $4",
                             target_id, hd, actor, investigation_id,
                         )
                         if act == DecisionAction.REJECT:
-                            degraded = await conn.fetch(
-                                "UPDATE relations SET support_level = 'a_confirmer', human_decision = 'unexamined', updated_at = now() "
-                                "WHERE investigation_id = $1 AND match_proposal_id = $2 AND support_level <> 'contradictoire' RETURNING id",
+                            to_degrade = await conn.fetch(
+                                "SELECT id, support_level FROM relations WHERE investigation_id = $1 AND match_proposal_id = $2 AND support_level <> 'contradictoire' AND support_level <> 'a_confirmer'",
                                 investigation_id, target_id,
                             )
-                            for row in degraded:
+                            degraded_support = {row["id"]: row["support_level"] for row in to_degrade}
+                            if degraded_support:
+                                await conn.execute(
+                                    "UPDATE relations SET support_level = 'a_confirmer', human_decision = 'unexamined', updated_at = now() "
+                                    "WHERE investigation_id = $1 AND id = ANY($2::text[])",
+                                    investigation_id, list(degraded_support.keys()),
+                                )
+                                await conn.execute(
+                                    "UPDATE decisions SET payload = payload || $2::jsonb WHERE id = $1",
+                                    decision["id"], _j({"degraded_support": degraded_support}),
+                                )
+                                decision["payload"] = {**decision["payload"], "degraded_support": degraded_support}
+                            for row in to_degrade:
                                 events.append(("relation.revaluated", {"relation_id": row["id"], "cause": "match_rejected"}))
                             events.append(("match.rejected", {"match_id": target_id}))
                         else:
@@ -431,11 +478,13 @@ class GraphService:
                 elif act == DecisionAction.MERGE:
                     if ttype == DecisionTargetType.MATCH_PROPOSAL:
                         prop = await conn.fetchrow(
-                            "SELECT entity_a, entity_b FROM match_proposals WHERE id = $1 AND investigation_id = $2",
+                            "SELECT entity_a, entity_b, status FROM match_proposals WHERE id = $1 AND investigation_id = $2",
                             target_id, investigation_id,
                         )
                         if prop is None:
                             raise PolicyDeny("proposition_inconnue", "graphe")
+                        if prop["status"] != MatchStatus.PROPOSED.value:
+                            raise PolicyDeny("proposition_deja_traitee_utiliser_undo", "graphe")
                         canonical, other = prop["entity_a"], prop["entity_b"]
                         await conn.execute(
                             "UPDATE match_proposals SET status = 'validated', decided_by = $2, updated_at = now() WHERE id = $1",
@@ -464,6 +513,14 @@ class GraphService:
                     )
                     if orig is None:
                         raise PolicyDeny("decision_inconnue", "graphe")
+                    later = await conn.fetchrow(
+                        "SELECT d.id FROM decisions d "
+                        "WHERE d.investigation_id = $1 AND d.target_id = $2 AND d.created_at > $3 "
+                        "AND d.id <> $4 AND NOT EXISTS (SELECT 1 FROM decisions u WHERE u.reverts = d.id) LIMIT 1",
+                        investigation_id, orig["target_id"], orig["created_at"], decision["id"],
+                    )
+                    if later is not None:
+                        raise PolicyDeny("decision_posterieure_presente", "graphe")
                     orig_payload = orig["payload"] if isinstance(orig["payload"], dict) else json.loads(orig["payload"] or "{}")
                     orig_action = orig["action"]
                     orig_target_type = orig["target_type"]
@@ -486,9 +543,12 @@ class GraphService:
                         events.append(("entity.unmerged", {"entity_id": other, "merged_into": None}))
                     elif orig_action in (DecisionAction.VALIDATE.value, DecisionAction.REJECT.value):
                         if orig_target_type == "assertion":
+                            previous_validation = orig_payload.get("previous_validation", ConfidenceLevel.INCONNUE.value)
                             await conn.execute(
-                                "UPDATE assertions SET human_decision = 'unexamined', updated_at = now() WHERE id = $1 AND investigation_id = $2",
-                                orig_target, investigation_id,
+                                "UPDATE assertions SET human_decision = 'unexamined', "
+                                "confidence = jsonb_set(coalesce(confidence,'{}'::jsonb), '{validation_humaine}', to_jsonb($2::text)), updated_at = now() "
+                                "WHERE id = $1 AND investigation_id = $3",
+                                orig_target, previous_validation, investigation_id,
                             )
                         elif orig_target_type == "relation":
                             await conn.execute(
@@ -500,19 +560,30 @@ class GraphService:
                                 "UPDATE match_proposals SET status = 'proposed', decided_by = NULL, updated_at = now() WHERE id = $1",
                                 orig_target,
                             )
+                            degraded_support = orig_payload.get("degraded_support") or {}
                             restored = await conn.fetch(
                                 "UPDATE relations SET human_decision = 'unexamined', updated_at = now() WHERE investigation_id = $1 AND match_proposal_id = $2 RETURNING id",
                                 investigation_id, orig_target,
                             )
+                            for rel_id, previous_level in degraded_support.items():
+                                await conn.execute(
+                                    "UPDATE relations SET support_level = $2, updated_at = now() WHERE id = $1 AND investigation_id = $3",
+                                    rel_id, previous_level, investigation_id,
+                                )
+                                events.append(("relation.revaluated", {"relation_id": rel_id, "cause": "match_undo_restored"}))
                             for row in restored:
-                                events.append(("relation.revaluated", {"relation_id": row["id"], "cause": "match_undo"}))
+                                if row["id"] not in degraded_support:
+                                    events.append(("relation.revaluated", {"relation_id": row["id"], "cause": "match_undo"}))
                         events.append(("decision.undone", {"undone": reverts}))
                     elif orig_action == DecisionAction.CORRECT.value:
                         correction_id = orig_payload.get("correction_id")
                         if correction_id:
-                            await conn.execute("UPDATE assertions SET superseded_by = NULL, updated_at = now() WHERE id = $1", correction_id)
+                            await conn.execute(
+                                "UPDATE assertions SET superseded_by = $2, updated_at = now() WHERE id = $1 AND superseded_by IS NULL",
+                                correction_id, orig_target,
+                            )
                             await conn.execute("UPDATE assertions SET superseded_by = NULL, updated_at = now() WHERE id = $1", orig_target)
-                        events.append(("assertion.restored", {"assertion_id": orig_target}))
+                        events.append(("assertion.restored", {"assertion_id": orig_target, "correction_id": correction_id}))
                     else:
                         raise PolicyDeny("action_non_reversible", "graphe")
                 elif act == DecisionAction.CORRECT:
@@ -526,7 +597,7 @@ class GraphService:
                     new_statement = payload.get("statement")
                     if not new_statement:
                         raise PolicyDeny("enonce_corrige_requis", "graphe")
-                    new_support = payload.get("support_level", SupportLevel.DOCUMENTE.value)
+                    new_support = payload.get("support_level", SupportLevel.A_CONFIRMER.value)
                     new_nature = payload.get("nature", orig["nature"])
                     new_proof_ids = payload.get("proof_ids", _as_list(orig["proof_ids"]))
                     confidence = await self.compute_confidence(investigation_id, new_proof_ids, payload.get("derivation", "source"), HumanDecision.UNEXAMINED.value)
@@ -631,9 +702,12 @@ class GraphService:
         if entity is None:
             return None
         identifiers = await self.list_identifiers(investigation_id, entity_id)
-        rel_out = await self.list_relations(investigation_id)
-        relations_out = [r for r in rel_out if r["src_id"] == entity_id]
-        relations_in = [r for r in rel_out if r["dst_id"] == entity_id]
+        rel = await self.pool.fetch(
+            "SELECT * FROM relations WHERE investigation_id = $1 AND (src_id = $2 OR dst_id = $2) ORDER BY created_at",
+            investigation_id, entity_id,
+        )
+        relations_out = [r for r in rel if r["src_id"] == entity_id]
+        relations_in = [r for r in rel if r["dst_id"] == entity_id]
         assertions = await self.list_assertions(investigation_id)
         branches = sorted({r["branch_id"] for r in relations_out + relations_in if r["branch_id"]} | {a["branch_id"] for a in assertions if a["branch_id"]})
         return {
