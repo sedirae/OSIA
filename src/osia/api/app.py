@@ -824,7 +824,10 @@ def create_app(engine: Engine) -> FastAPI:
             ".js": "text/javascript; charset=utf-8",
             ".svg": "image/svg+xml",
             ".json": "application/json; charset=utf-8",
-        }.get(candidate.suffix.lower(), "application/octet-stream")
+        }.get(candidate.suffix.lower())
+        if media is None:
+            # liste blanche (audit PR #22 P3-4) : seuls les assets du shell sont servis
+            raise ApiError("not_found", "fichier inconnu", 404)
         return FileResponse(candidate, media_type=media)
 
     return app

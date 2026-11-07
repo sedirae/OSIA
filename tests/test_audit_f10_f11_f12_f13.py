@@ -189,6 +189,16 @@ async def test_f12_export_branche_fermeture_complete(engine, tmp_path):
         inv["id"], branch_id=branch_b["id"], statement="MARQUEUR-B-secret", proof_ids=[proof_b["proof_ref_id"]],
     )
     await engine.graph.decide(inv["id"], target_type="assertion", target_id=ass_b["id"], action="reject")
+    # activité technique/financière de la branche B (audit PR #22 P2-1) : ne doit pas fuiter
+    await engine.repo.set_setting("paid_calls_enabled", True)
+    task_b = await _insert(engine, inv, branch_b["id"], "source_query", {"connector_id": "simulated.web", "query": "https://exemple.test/b"})
+    op_b = await engine.repo.insert_op(investigation_id=inv["id"], kind="source_request", target="simulated.web", is_paid=True, cost_estimated_cents=1, task_id=task_b["id"])
+    res_b = await engine.budgets.reserve(idempotency_key=f"{op_b['id']}:reserve", investigation_id=inv["id"], branch_id=branch_b["id"], op_id=op_b["id"], amount_cents=1)
+    async with engine.pool.acquire() as c:
+        await c.execute(
+            "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) VALUES ($1, $2, 'consumed', 1, '2026-11', 'note B')",
+            inv["id"], res_b["id"],
+        )
 
     def read_tables(archive_path):
         tables = {}
@@ -207,6 +217,10 @@ async def test_f12_export_branche_fermeture_complete(engine, tmp_path):
     assert all("MARQUEUR-B" not in r["statement"] for r in payload["assertions"])
     # la décision sur l'assertion de B n'est pas exportée
     assert all(d["target_id"] != ass_b["id"] for d in payload["decisions"])
+    # P2-1 : les opérations externes et le ledger de la branche B ne fuient pas
+    assert all(o["task_id"] != task_b["id"] for o in payload["external_ops"])
+    assert all(l["reservation_id"] != res_b["id"] for l in payload["ledger"])
+    assert all("note B" not in json.dumps(l) for l in payload["ledger"])
     # le rapport HTML embarqué ne contient pas le marqueur de B (étayage filtré aussi)
     html = (out / "rapport.html").read_text(encoding="utf-8")
     assert "MARQUEUR-B" not in html

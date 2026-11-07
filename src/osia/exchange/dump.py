@@ -234,17 +234,21 @@ async def dump_investigation(
     """Extrait toutes les tables liees a une investigation (CON-14 §1.3).
 
     branch_ids restreint l'export a la FERMETURE du périmètre choisi (audit F12, T7.4/T7.8) :
-    branches/tasks/assertions/relations/events/reservations des branches choisies, décisions
-    portant sur ces assertions/relations, et preuves (proof_refs + proof_files) référencées par
-    ces assertions/relations. Les entites, identifiants et match_proposals restent ceux de
-    l'investigation (pas de branche propre). exclusions retire des tables techniques/financieres."""
+    branches/tasks/assertions/relations/events/reservations/external_ops/ledger des branches
+    choisies, décisions portant sur ces assertions/relations, et preuves (proof_refs +
+    proof_files) référencées par ces assertions/relations. Les entites, identifiants et
+    match_proposals restent ceux de l'investigation (pas de branche propre). Les branches
+    ANCESTRALES d'une branche choisie ne sont pas remontées (parent_branch_id peut alors être
+    signalé dangling a l'import). exclusions retire des tables techniques/financieres."""
     exclusions = exclusions or set()
     payload: dict[str, list[dict[str, Any]]] = {}
     async with pool.acquire() as conn:
-        # Périmètre branch_ids : identifiants des assertions/relations retenues, utilisés pour
-        # la fermeture des décisions et des preuves.
+        # Périmètre branch_ids : identifiants des lignes retenues, utilisés pour la fermeture
+        # des décisions, des preuves, des opérations externes et du ledger.
         sel_assertions: list[str] = []
         sel_relations: list[str] = []
+        sel_tasks: list[str] = []
+        sel_reservations: list[str] = []
         if branch_ids:
             sel_assertions = [
                 r["id"]
@@ -257,6 +261,20 @@ async def dump_investigation(
                 r["id"]
                 for r in await conn.fetch(
                     "SELECT id FROM relations WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2))",
+                    investigation_id, branch_ids,
+                )
+            ]
+            sel_tasks = [
+                r["id"]
+                for r in await conn.fetch(
+                    "SELECT id FROM tasks WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2))",
+                    investigation_id, branch_ids,
+                )
+            ]
+            sel_reservations = [
+                r["id"]
+                for r in await conn.fetch(
+                    "SELECT id FROM reservations WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2))",
                     investigation_id, branch_ids,
                 )
             ]
@@ -316,6 +334,21 @@ async def dump_investigation(
                     f"SELECT * FROM {table} WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2)) "
                     "ORDER BY created_at",
                     investigation_id, branch_ids,
+                )
+            elif branch_ids and table == "external_ops":
+                # F12 (audit PR #22 P2-1) : les opérations externes suivent leurs tâches du
+                # périmètre — sinon fuite des métadonnées d'activité des autres branches.
+                rows = await conn.fetch(
+                    "SELECT * FROM external_ops WHERE investigation_id = $1 AND (task_id IS NULL OR task_id = ANY($2)) "
+                    "ORDER BY created_at",
+                    investigation_id, sel_tasks or ["__none__"],
+                )
+            elif branch_ids and table == "ledger":
+                # F12 (audit PR #22 P2-1) : le ledger suit les réservations du périmètre.
+                rows = await conn.fetch(
+                    "SELECT * FROM ledger WHERE investigation_id = $1 AND (reservation_id IS NULL OR reservation_id = ANY($2)) "
+                    "ORDER BY created_at",
+                    investigation_id, sel_reservations or ["__none__"],
                 )
             else:
                 order = "fetched_at" if table == "proof_refs" else "created_at"
@@ -574,6 +607,12 @@ async def _verify_refs(
             rid = row.get(pk)
             for col, ref_table in spec["refs"].items():
                 await check(ref_table, resolve(ref_table, row.get(col)), table=table, rid=rid, col=col, missing=row.get(col))
+            if table == "proof_refs" and row.get("proof_sha256"):
+                # F10 (audit PR #22 P3-5) : proof_sha256 doit résoudre vers un proof_files
+                # (non remappé : la clé est le contenu, stable entre instances).
+                ok = await conn.fetchval("SELECT 1 FROM proof_files WHERE sha256 = $1", row["proof_sha256"])
+                if not ok:
+                    dangling.append({"table": table, "id": rid, "column": "proof_sha256", "missing": row["proof_sha256"], "ref_table": "proof_files"})
             if row.get("target_id") is not None:
                 rt = target_ref.get(row.get("target_type"))
                 if rt:
