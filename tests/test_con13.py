@@ -68,6 +68,15 @@ def test_override_sous_borne_rejete_et_au_dessus_clampe():
     assert limits_from_profile_row(profile_row(), {"max_rebonds": 11}).max_rebonds == 2
 
 
+def test_override_non_entier_rejete_par_pydantic_sans_crash():
+    """Un override non entier (chaîne, flottant) est rejeté proprement par la validation
+    pydantic — jamais de crash int() ni de troncature silencieuse (2.9 -> 2 interdit)."""
+    with pytest.raises(ValidationError):
+        limits_from_profile_row(profile_row(), {"max_rebonds": "beaucoup"})
+    with pytest.raises(ValidationError):
+        limits_from_profile_row(profile_row(), {"max_rebonds": 2.5})
+
+
 async def test_investigation_effective_limits_clampes_au_profil(engine):
     """Création d'investigation avec overrides supérieurs : effective_limits = profil (D7 §9.2)."""
     from osia.models import CreateInvestigationRequest
@@ -186,6 +195,21 @@ async def test_api_settings_get_put(engine):
         assert r.status_code == 400
         r = await client.put("/api/v1/settings", json={"settings": {"inconnu": 1}})
         assert r.status_code == 400
+
+        # D7 §9.3 : validation de TOUT le payload avant enregistrement — une clé invalide
+        # ne doit laisser AUCUNE clé persistée (pas de mise à jour partielle)
+        before = await engine.repo.get_setting("source_cache_ttl_hours")
+        r = await client.put(
+            "/api/v1/settings",
+            json={"settings": {"source_cache_ttl_hours": 72, "global_monthly_cap_cents": -1}},
+        )
+        assert r.status_code == 400
+        assert await engine.repo.get_setting("source_cache_ttl_hours") == before
+
+        # D7 §9.1 : toutes les clés administrables exposent une valeur effective (non nulle)
+        r = await client.get("/api/v1/settings")
+        for key in ("paid_calls_enabled", "global_monthly_cap_cents", "timezone", "source_cache_ttl_hours", "audit_retention_days", "session_ttl_hours"):
+            assert r.json()["settings"][key] is not None
 
 
 async def test_api_profiles_create_et_validation(engine):

@@ -61,6 +61,10 @@ class Engine:
         await self.repo.set_setting("timezone", await self.repo.get_setting("timezone", self.settings.timezone))
         # CON-13 / V1.4 : TTL du cache technique des requêtes source (24 h par défaut)
         await self.repo.set_setting("source_cache_ttl_hours", await self.repo.get_setting("source_cache_ttl_hours", 24))
+        # CON-13 / D7 §9.1 : les paramètres administrables sont seedés pour exposer leur valeur
+        # effective (GET /api/v1/settings) dès le premier démarrage
+        await self.repo.set_setting("audit_retention_days", await self.repo.get_setting("audit_retention_days", self.settings.audit_retention_days))
+        await self.repo.set_setting("session_ttl_hours", await self.repo.get_setting("session_ttl_hours", self.settings.session_ttl_hours))
         self.bus = EventBus(self.repo)
         self.budgets = BudgetManager(self.pool)
         self.registry = ConnectorRegistry()

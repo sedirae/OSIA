@@ -185,12 +185,16 @@ def create_app(engine: Engine) -> FastAPI:
         persistée et auditée. S'applique aux FUTURES opérations (D7 §9.2 : pas de rétroactivité —
         les investigations en cours conservent leurs effective_limits)."""
         await require_auth(request)
-        updated: dict[str, Any] = {}
+        # D7 §9.3 : TOUT le payload est validé AVANT tout enregistrement (aucune mise à jour
+        # partielle si une clé est invalide).
+        validated: dict[str, Any] = {}
         for key, raw in body.settings.items():
             try:
-                value = validate_setting_value(key, raw)
+                validated[key] = validate_setting_value(key, raw)
             except ValueError as exc:
                 raise ApiError("bad_request", str(exc), 400) from exc
+        updated: dict[str, Any] = {}
+        for key, value in validated.items():
             await engine.repo.set_setting(key, value)
             updated[key] = value
         if "audit_retention_days" in updated:

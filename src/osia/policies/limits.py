@@ -50,5 +50,10 @@ def limits_from_profile_row(
     if overrides:
         for key, value in overrides.items():
             if key in LimitSet.model_fields and value is not None:
-                merged[key] = min(int(value), int(merged[key]))  # clamp : jamais au-dessus du profil
+                if isinstance(value, bool) or not isinstance(value, int):
+                    # hors schéma (chaîne, flottant...) : pas de clamp silencieux ni de crash,
+                    # la validation pydantic de LimitSet tranche (rejet propre)
+                    merged[key] = value
+                else:
+                    merged[key] = min(value, int(merged[key]))  # clamp : jamais au-dessus du profil
     return LimitSet(**merged)

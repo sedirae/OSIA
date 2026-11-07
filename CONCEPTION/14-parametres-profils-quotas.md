@@ -18,7 +18,7 @@
 ## 3. Paramètres globaux administrables (D7 §9.1–9.3)
 
 - Schéma `EDITABLE_SETTINGS` (models.py) : `paid_calls_enabled` (défaut **false** — V1.4 budget 0 € au premier démarrage), `global_monthly_cap_cents` (défaut 500 = 5 €/mois présaisi V1.4), `timezone`, `source_cache_ttl_hours` (24), `audit_retention_days`, `session_ttl_hours`. **Aucun secret n'est modifiable ici** (les secrets restent dans le coffre CON-06).
-- `validate_setting_value` : vérification de validité (type + bornes) **avant** enregistrement (D7 §9.3).
+- `validate_setting_value` : vérification de validité (type + bornes) **avant** enregistrement (D7 §9.3). Le `PUT` valide **tout** le payload avant de persister la moindre clé (aucune mise à jour partielle si une clé est invalide).
 - API : `GET /api/v1/settings`, `PUT /api/v1/settings` (persisté en table `settings`, appliqué au runtime — rétention d'audit, TTL de session — et **audité** `op.settings.update`). CLI : `osia settings list|set <key> <value>`.
 - Hiérarchie appliquée (D7 §9.2) : les paramètres globaux s'appliquent aux **futures** opérations ; les investigations en cours conservent leurs `effective_limits` figées (pas de rétroactivité, REC-D7-01) ; un plafond global restrictif bloque les futures opérations via les caps du BudgetManager.
 
@@ -38,4 +38,4 @@
 
 ## 7. Vérifications réellement exécutées
 
-- `pytest -q` : **145 tests passés** (1 désélectionné : `test_concurrent_reservations_cannot_exceed_cap`, défaillant aussi sur `main` avant cette tranche), dont **11 dans `tests/test_con13.py`** : clamp des overrides (jamais au-dessus du profil, garde-fous V1.4 non surchargeables à la hausse, abaissement possible, borne inférieure rejetée), `effective_limits` d'investigation clampées au profil, validation des settings (bornes, types, clé inconnue), cache set/get/expiration/purge, handler source qui réutilise le cache **sans second appel** (B-ACC-06), warnings de plafond à 80 % + avertissement « payants désactivés », API settings GET/PUT (400 invalide), API profiles create/400/409.
+- `pytest -q` : **146 tests passés** (1 défaillant : `test_concurrent_reservations_cannot_exceed_cap`, défaillant aussi sur `main` avant cette tranche), dont **12 dans `tests/test_con13.py`** : clamp des overrides (jamais au-dessus du profil, garde-fous V1.4 non surchargeables à la hausse, abaissement possible, borne inférieure rejetée, override non entier rejeté proprement par pydantic), `effective_limits` d'investigation clampées au profil, validation des settings (bornes, types, clé inconnue, atomicité du PUT), cache set/get/expiration/purge, handler source qui réutilise le cache **sans second appel** (B-ACC-06), warnings de plafond à 80 % + avertissement « payants désactivés », API settings GET/PUT (400 invalide, valeurs effectives non nulles), API profiles create/400/409.

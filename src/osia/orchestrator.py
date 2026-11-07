@@ -106,7 +106,11 @@ class Orchestrator:
         if req.limits:
             for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
                 demanded = req.limits.get(field)
-                if demanded is not None and int(demanded) > getattr(inv_limits, field):
+                if (
+                    isinstance(demanded, int)
+                    and not isinstance(demanded, bool)
+                    and demanded > getattr(inv_limits, field)
+                ):
                     raise PolicyDeny(f"plafond_branche_superieur:{field}", "branche")
         branch_limits = limits_from_profile_row(profile, req.limits)
         for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
