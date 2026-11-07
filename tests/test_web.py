@@ -75,7 +75,7 @@ async def test_web_pages_available_while_investigation_runs(engine):
 
 
 async def test_import_apply_accepts_binary_upload(engine):
-    """Le client web importe par upload binaire (Ã©volution compatible de /api/v1/import/apply)."""
+    """Le client web importe par upload binaire (évolution compatible de /api/v1/import/apply)."""
     async with await client_for(engine) as client:
         inv = await make_investigation(engine, title="import-web")
         r = await client.post(
@@ -97,10 +97,14 @@ async def test_import_apply_accepts_binary_upload(engine):
         assert sum(1 for i in invs.json() if i["title"] == "import-web") == 2
         r3 = await client.post("/api/v1/import/apply", content=b"", headers={"Content-Type": "application/json"})
         assert r3.status_code == 400
+        r4 = await client.post("/api/v1/import/apply", content=b"{pas json", headers={"Content-Type": "application/json"})
+        assert r4.status_code == 400
+        r5 = await client.post("/api/v1/import/apply", json={"mode": "add"})
+        assert r5.status_code == 400
 
 
 def test_app_js_smoke_node():
-    """app.js se charge sans exception avec un DOM simulÃ© et rend la vue d'accueil."""
+    """app.js se charge sans exception avec un DOM simulé et rend la vue d'accueil."""
     if shutil.which("node") is None:
         return
     app_js = pathlib.Path(__file__).parent.parent / "src" / "osia" / "web" / "app.js"

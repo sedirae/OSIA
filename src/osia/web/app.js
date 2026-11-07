@@ -24,6 +24,9 @@
     graphMode: 'reseau',
     filters: { query: '', hideRejected: false, kinds: {} },
     positions: {},
+    view: { x: 0, y: 0, k: 1 },
+    journal: [],
+    layoutSig: null,
     selected: null,
     cursor: 0,
     sseAbort: null,
@@ -95,7 +98,10 @@
   function parseRoute() {
     var h = (window.location.hash || '#/').replace(/^#/, '');
     var m = h.match(/^\/inv\/(.+)$/);
-    return m ? { name: 'inv', id: decodeURIComponent(m[1]) } : { name: 'home' };
+    if (!m) return { name: 'home' };
+    var id = m[1];
+    try { id = decodeURIComponent(id); } catch (e) { return { name: 'home' }; }
+    return { name: 'inv', id: id };
   }
   async function renderRoute() {
     var route = parseRoute();
@@ -239,8 +245,11 @@
     }
     var stored = null;
     try { stored = storage.getItem('osia_pos_' + id); } catch (err) { stored = null; }
-    state.positions = stored ? JSON.parse(stored) : {};
+    try { state.positions = stored ? JSON.parse(stored) : {}; } catch (err) { state.positions = {}; }
     state.cursor = 0;
+    state.journal = [];
+    state.view = { x: 0, y: 0, k: 1 };
+    state.layoutSig = null;
     renderLayout();
     startEvents(id);
   }
@@ -291,6 +300,7 @@
 
     colSuivi.appendChild(el('h2', { text: 'Journal des opérations' }));
     colSuivi.appendChild(el('ul', { id: 'journal', 'aria-live': 'polite' }));
+    state.journal.forEach(function (ev) { appendJournal(ev, true); });
 
     colSuivi.appendChild(el('h2', { text: 'Tâches' }));
     colSuivi.appendChild(el('ul', { class: 'plain small', id: 'task-list' }));
@@ -298,13 +308,21 @@
 
     renderBranches(colGraphe);
     renderGraphToolbar(colGraphe);
-    var svg = el('svg', { id: 'graph-svg', role: 'img', 'aria-label': 'Graphe relationnel' });
+    var SVG_NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('id', 'graph-svg');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', 'Graphe relationnel');
     colGraphe.appendChild(svg);
     renderGraph(svg);
     colGraphe.appendChild(el('h2', { text: 'Synthèse' }));
     var synth = el('div', { id: 'synthese' });
     colGraphe.appendChild(synth);
     renderSynthese(synth);
+    colGraphe.appendChild(el('h2', { text: 'Rapprochements proposés (supervisés)' }));
+    var matches = el('div', { id: 'matches' });
+    colGraphe.appendChild(matches);
+    renderMatches(matches);
     colGraphe.appendChild(el('h2', { text: 'Restitution (manuelle)' }));
     var rest = el('div', { id: 'restitution' });
     colGraphe.appendChild(rest);
@@ -425,15 +443,25 @@
     });
   }
 
+  function layoutSignature() {
+    return state.graphMode + '|' + state.graph.entities.map(function (e) { return e.id; }).sort().join(',');
+  }
+
   function computePositions(entities, relations) {
     var pos = state.positions;
     var n = entities.length;
+    var fresh = false;
     entities.forEach(function (e, i) {
       if (!pos[e.id]) {
+        fresh = true;
         var a = (2 * Math.PI * i) / Math.max(n, 1);
         pos[e.id] = { x: 400 + 260 * Math.cos(a), y: 300 + 200 * Math.sin(a), fixed: false };
       }
     });
+    var sig = layoutSignature();
+    var run = fresh || sig !== state.layoutSig;
+    state.layoutSig = sig;
+    if (!run) return pos;
     if (state.graphMode === 'arborescent') {
       var incoming = {};
       relations.forEach(function (r) { incoming[r.dst_id] = true; });
@@ -450,7 +478,10 @@
       var byLevel = {};
       entities.forEach(function (e) { var l = level[e.id] === undefined ? 0 : level[e.id]; (byLevel[l] = byLevel[l] || []).push(e); });
       Object.keys(byLevel).forEach(function (l) {
-        byLevel[l].forEach(function (e, i) { pos[e.id] = { x: 80 + Number(l) * 190, y: 60 + i * 80, fixed: !!(pos[e.id] && pos[e.id].fixed) }; });
+        byLevel[l].forEach(function (e, i) {
+          if (pos[e.id] && pos[e.id].fixed) return;
+          pos[e.id] = { x: 80 + Number(l) * 190, y: 60 + i * 80, fixed: false };
+        });
       });
     } else if (state.graphMode === 'regroupe') {
       var byKind = {};
@@ -460,8 +491,9 @@
         var cx = 400 + 300 * Math.cos((2 * Math.PI * gi) / Math.max(kinds.length, 1));
         var cy = 300 + 240 * Math.sin((2 * Math.PI * gi) / Math.max(kinds.length, 1));
         byKind[k].forEach(function (e, i) {
+          if (pos[e.id] && pos[e.id].fixed) return;
           var a = (2 * Math.PI * i) / Math.max(byKind[k].length, 1);
-          pos[e.id] = { x: cx + 90 * Math.cos(a), y: cy + 70 * Math.sin(a), fixed: !!(pos[e.id] && pos[e.id].fixed) };
+          pos[e.id] = { x: cx + 90 * Math.cos(a), y: cy + 70 * Math.sin(a), fixed: false };
         });
       });
     } else {
@@ -469,6 +501,7 @@
         var k = 1 - it / 60;
         entities.forEach(function (a) {
           var pa = pos[a.id];
+          if (pa.fixed) return;
           entities.forEach(function (b) {
             if (a === b) return;
             var pb = pos[b.id];
@@ -484,13 +517,42 @@
           var dx = pd.x - ps.x, dy = pd.y - ps.y;
           var d = Math.sqrt(dx * dx + dy * dy) || 1;
           var f = (d - 120) * 0.02 * k;
-          ps.x += dx / d * f; ps.y += dy / d * f;
-          pd.x -= dx / d * f; pd.y -= dy / d * f;
+          if (!ps.fixed) { ps.x += dx / d * f; ps.y += dy / d * f; }
+          if (!pd.fixed) { pd.x -= dx / d * f; pd.y -= dy / d * f; }
         });
         entities.forEach(function (e) { var p = pos[e.id]; p.x = Math.max(40, Math.min(760, p.x)); p.y = Math.max(40, Math.min(560, p.y)); });
       }
     }
     return pos;
+  }
+
+  function applyView(svg) {
+    var vp = svg.firstChild;
+    if (vp) vp.setAttribute('transform', 'translate(' + state.view.x + ',' + state.view.y + ') scale(' + state.view.k + ')');
+  }
+
+  function bindGraphInteractions(svg) {
+    if (svg.__osiaBound) return;
+    svg.__osiaBound = true;
+    svg.addEventListener('wheel', function (ev) {
+      ev.preventDefault();
+      var f = ev.deltaY < 0 ? 1.1 : 0.9;
+      state.view.k = Math.max(0.2, Math.min(4, state.view.k * f));
+      applyView(svg);
+    }, { passive: false });
+    var pan = false, px = 0, py = 0;
+    svg.addEventListener('pointerdown', function (ev) {
+      if (ev.target && ev.target.closest && ev.target.closest('.node')) { pan = false; return; }
+      pan = true; px = ev.clientX; py = ev.clientY;
+    });
+    svg.addEventListener('pointermove', function (ev) {
+      if (!pan) return;
+      state.view.x += ev.clientX - px; state.view.y += ev.clientY - py;
+      px = ev.clientX; py = ev.clientY;
+      applyView(svg);
+    });
+    svg.addEventListener('pointerup', function () { pan = false; });
+    svg.addEventListener('dblclick', function () { state.view = { x: 0, y: 0, k: 1 }; applyView(svg); });
   }
 
   function renderGraph(svg) {
@@ -501,15 +563,14 @@
     var pos = computePositions(vis, rels);
     var hidden = state.graph.entities.length - vis.length;
     var counter = $('graph-counter');
-    if (counter) counter.textContent = vis.length + ' entités affichées, ' + rels.length + ' relations — ' + hidden + ' masquées par les filtres (masqué ≠ absent, C4-13)';
+    if (counter) counter.textContent = vis.length + ' affichées / ' + state.graph.entities.length + ' au total — ' + hidden + ' masquées par les filtres (masqué ≠ absent, C4-13)';
 
     var vp = document.createElementNS(NS, 'g');
     vp.setAttribute('id', 'viewport');
     svg.appendChild(vp);
-    var view = { x: 0, y: 0, k: 1 };
-    function applyView() { vp.setAttribute('transform', 'translate(' + view.x + ',' + view.y + ') scale(' + view.k + ')'); }
-    applyView();
+    applyView(svg);
 
+    var edgeEls = {};
     rels.forEach(function (r) {
       var ps = pos[r.src_id], pd = pos[r.dst_id];
       if (!ps || !pd) return;
@@ -530,7 +591,16 @@
       line.addEventListener('click', function () { select('relation', r.id); });
       line.addEventListener('keydown', function (e) { if (e.key === 'Enter') select('relation', r.id); });
       vp.appendChild(line);
+      edgeEls[r.id] = line;
     });
+    function moveEdges(entityId) {
+      rels.forEach(function (r) {
+        var line = edgeEls[r.id];
+        if (!line) return;
+        if (r.src_id === entityId) { line.setAttribute('x1', pos[r.src_id].x); line.setAttribute('y1', pos[r.src_id].y); }
+        if (r.dst_id === entityId) { line.setAttribute('x2', pos[r.dst_id].x); line.setAttribute('y2', pos[r.dst_id].y); }
+      });
+    }
 
     vis.forEach(function (e) {
       var p = pos[e.id];
@@ -555,33 +625,16 @@
       g.addEventListener('pointerdown', function (ev) { drag = true; sx = ev.clientX; sy = ev.clientY; p.fixed = true; if (g.setPointerCapture) g.setPointerCapture(ev.pointerId); });
       g.addEventListener('pointermove', function (ev) {
         if (!drag) return;
-        p.x += (ev.clientX - sx) / view.k; p.y += (ev.clientY - sy) / view.k;
+        p.x += (ev.clientX - sx) / state.view.k; p.y += (ev.clientY - sy) / state.view.k;
         sx = ev.clientX; sy = ev.clientY;
         g.setAttribute('transform', 'translate(' + p.x + ',' + p.y + ')');
-        savePositions();
-        clear(svg); renderGraph(svg);
+        moveEdges(e.id);
       });
-      g.addEventListener('pointerup', function () { drag = false; });
+      g.addEventListener('pointerup', function () { if (drag) { drag = false; savePositions(); } });
       vp.appendChild(g);
     });
 
-    svg.addEventListener('wheel', function (ev) {
-      ev.preventDefault();
-      var f = ev.deltaY < 0 ? 1.1 : 0.9;
-      view.k = Math.max(0.2, Math.min(4, view.k * f));
-      applyView();
-    }, { passive: false });
-    var pan = false, px = 0, py = 0;
-    svg.addEventListener('pointerdown', function (ev) { pan = true; px = ev.clientX; py = ev.clientY; });
-    svg.addEventListener('pointermove', function (ev) {
-      if (!pan) return;
-      if (ev.target && ev.target.closest && ev.target.closest('.node')) return;
-      view.x += ev.clientX - px; view.y += ev.clientY - py;
-      px = ev.clientX; py = ev.clientY;
-      applyView();
-    });
-    svg.addEventListener('pointerup', function () { pan = false; });
-    svg.addEventListener('dblclick', function () { view = { x: 0, y: 0, k: 1 }; applyView(); });
+    bindGraphInteractions(svg);
   }
 
   function savePositions() {
@@ -618,12 +671,23 @@
   }
 
   function decisionButtons(fiche, targetType, targetId) {
+    var actions = {
+      entity: [['annotate', 'Annoter']],
+      relation: [['validate', 'Valider'], ['reject', 'Rejeter'], ['annotate', 'Annoter']],
+      assertion: [['validate', 'Valider'], ['reject', 'Rejeter'], ['correct', 'Corriger'], ['annotate', 'Annoter']],
+      match_proposal: [['validate', 'Valider'], ['reject', 'Rejeter'], ['merge', 'Fusionner'], ['annotate', 'Annoter']]
+    }[targetType] || [];
     var row = el('p', { class: 'row' });
-    [['validate', 'Valider'], ['reject', 'Rejeter'], ['annotate', 'Annoter']].forEach(function (pair) {
+    actions.forEach(function (pair) {
       var b = el('button', { type: 'button', text: pair[1] });
       b.addEventListener('click', async function () {
         var payload = {};
         if (pair[0] === 'annotate') { payload.note = window.prompt('Annotation (facultative) :', '') || ''; }
+        if (pair[0] === 'correct') {
+          var statement = window.prompt('Énoncé corrigé de l’assertion :', '');
+          if (!statement || !statement.trim()) return;
+          payload.statement = statement.trim();
+        }
         try {
           await apiJson('/api/v1/investigations/' + state.invId + '/decisions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_type: targetType, target_id: targetId, action: pair[0], payload: payload }) });
           await refreshData();
@@ -737,6 +801,32 @@
     if (p) container.appendChild(el('span', { class: 'small', text: ' — ' + (p.label || '') + ' ' + (p.source_url || '') + ' (' + fmtDate(p.fetched_at) + ')' }));
   }
 
+  function entityLabelById(id) {
+    var e = state.graph.entities.find(function (x) { return x.id === id; });
+    return e ? entityLabel(e) : id;
+  }
+
+  function renderMatches(container) {
+    if (!container) return;
+    clear(container);
+    if (!state.matches.length) {
+      container.appendChild(el('p', { class: 'muted small', text: 'Aucune proposition de rapprochement.' }));
+      return;
+    }
+    var ul = el('ul', { class: 'plain' });
+    state.matches.forEach(function (m) {
+      var li = el('li', { class: 'assertion' });
+      li.appendChild(el('p', { class: 'small', text: entityLabelById(m.entity_a) + ' ≈ ' + entityLabelById(m.entity_b) + ' (' + (m.basis || '') + (m.confidence ? ', ' + m.confidence : '') + ')' + (m.justification ? ' — ' + m.justification : '') }));
+      if (m.status === 'proposed') {
+        decisionButtons(li, 'match_proposal', m.id);
+      } else {
+        li.appendChild(el('p', { class: 'badges' }, [badge('décision : ' + m.status, m.status === 'validated' ? 'validee' : m.status === 'rejected' ? 'rejetee' : 'unexamined')]));
+      }
+      ul.appendChild(li);
+    });
+    container.appendChild(ul);
+  }
+
   function renderRestitution(container) {
     if (!container) return;
     var card = el('div', { class: 'card' });
@@ -768,6 +858,11 @@
         passphrase: fd.get('encrypt') === 'on' ? String(fd.get('passphrase') || '') : null
       };
       if (String(fd.get('scope')) === 'branch' && state.branchFilter) body.branch_ids = [state.branchFilter];
+      if (String(fd.get('scope')) === 'branch' && !state.branchFilter) {
+        var w = $('export-result');
+        if (w) w.textContent = 'Portée « branche » sélectionnée mais aucune branche active : sélectionnez une branche dans l’arbre, ou choisissez la portée consolidée.';
+        return;
+      }
       try {
         var res = await apiJson('/api/v1/investigations/' + state.invId + '/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         var out = $('export-result');
@@ -791,7 +886,6 @@
     var applyAdd = el('button', { type: 'button', text: 'Appliquer (ajout)' });
     var applyMerge = el('button', { type: 'button', text: 'Appliquer (fusion)' });
     var prevBox = el('pre', { class: 'small', id: 'import-preview' });
-    prevBox.setAttribute('style', 'max-height:200px;overflow:auto');
     imp.appendChild(el('p', { class: 'row' }, [prevBtn, applyAdd, applyMerge]));
     imp.appendChild(prevBox);
     var currentFile = null;
@@ -863,6 +957,7 @@
       document.body.appendChild(a);
       a.click();
       a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     } catch (e) { if (e.status !== 401) window.alert('Téléchargement impossible : ' + e.message); }
   }
 
@@ -913,7 +1008,11 @@
     appendJournal(ev);
     onEvent(ev);
   }
-  function appendJournal(ev) {
+  function appendJournal(ev, replay) {
+    if (!replay) {
+      state.journal.push(ev);
+      if (state.journal.length > 300) state.journal = state.journal.slice(-300);
+    }
     var ul = $('journal');
     if (!ul) return;
     var li = el('li', {});

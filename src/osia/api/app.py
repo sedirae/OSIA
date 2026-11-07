@@ -433,7 +433,10 @@ def create_app(engine: Engine) -> FastAPI:
         raw = await request.body()
         if not raw:
             raise ApiError("bad_request", "corps JSON ou upload binaire requis", 400)
-        body = ImportApplyRequest(**json.loads(raw))
+        try:
+            body = ImportApplyRequest(**json.loads(raw))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ApiError("bad_request", f"corps JSON invalide : {exc}", 400) from exc
         return await engine.exchange.apply_import(
             pathlib.Path(body.path), mode=body.mode, on_conflict=body.on_conflict, passphrase=body.passphrase
         )

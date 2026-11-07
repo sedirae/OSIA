@@ -125,3 +125,4 @@ dialog menu { display: flex; justify-content: flex-end; gap: 0.5rem; padding: 0;
 .branche.active > .branche-head { font-weight: 700; color: var(--accent); }
 .assertion { border: 1px solid var(--bordure); border-radius: 8px; padding: 0.5rem 0.7rem; margin: 0.4rem 0; background: var(--surface); }
 .assertion .badges { display: flex; gap: 0.35rem; flex-wrap: wrap; margin: 0.25rem 0; }
+#import-preview { max-height: 200px; overflow: auto; }
