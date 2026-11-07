@@ -20,10 +20,12 @@
 <dialog id="auth-dialog" aria-labelledby="auth-title">
   <form method="dialog" id="auth-form">
     <h2 id="auth-title">Authentification requise (mode serveur)</h2>
-    <p class="muted">Jeton Bearer de l'instance. Conservé uniquement pour cette session.</p>
+    <p class="muted">Jeton administrateur de l'instance. Il est échangé contre une session expirable et révocable ; le jeton lui-même n'est jamais conservé.</p>
     <label for="auth-token">Jeton</label>
     <input id="auth-token" name="token" type="password" autocomplete="current-password" required>
+    <p id="auth-error" class="muted" hidden></p>
     <menu>
+      <button type="button" id="auth-logout" hidden>Se déconnecter</button>
       <button type="button" id="auth-cancel">Annuler</button>
       <button type="submit" value="ok" class="primary">Se connecter</button>
     </menu>

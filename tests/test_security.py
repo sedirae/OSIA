@@ -23,13 +23,18 @@ def server_engine(engine, token: bytes = b"secret"):
 
 
 async def test_server_mode_requires_auth_everywhere(engine):
-    """CON-05 / T5.7 / EXEC-05 : en mode serveur, toutes les routes (API, web, static) exigent
-    un credential, même sans frontend. Les refus sont audités (T5.9) sans secret."""
+    """CON-05 / T5.7 / EXEC-05 : en mode serveur, toutes les routes API exigent un credential,
+    même sans frontend. Audit F11 : le shell web ('/' et '/static/*') reste PUBLIC (formulaire
+    de connexion, aucune donnée sensible) pour permettre la connexion depuis un navigateur ;
+    seules les données (/api/v1/*) sont protégées. Les refus sont audités (T5.9) sans secret."""
     server_engine(engine)
     async with await client_for(engine) as client:
-        for path in ["/api/v1/health", "/api/v1/profiles", "/api/v1/investigations", "/api/v1/auth/sessions", "/", "/static/app.js"]:
+        for path in ["/api/v1/health", "/api/v1/profiles", "/api/v1/investigations", "/api/v1/auth/sessions"]:
             r = await client.get(path)
             assert r.status_code == 401, path
+        # shell de connexion public (F11) : la page et ses assets se chargent sans header
+        assert (await client.get("/")).status_code == 200
+        assert (await client.get("/static/app.js")).status_code == 200
         entries = engine.audit.read(limit=50)
         assert any(e["action"] == "auth.denied" and e["outcome"] == "failure" for e in entries)
         assert all("secret" not in json.dumps(e) for e in entries)

@@ -258,8 +258,10 @@ class ReportService:
         etayage: list[dict] = []
         objectif: Optional[dict] = None
         if self.graph is not None:
-            etayage = await self.graph.etayage(investigation_id)
-            objectif = await self.graph.objective_etaye(investigation_id)
+            # F12 : l'étayage et l'objectif sont calculés sur le MÊME périmètre que l'export
+            # (branch_ids), sinon les assertions des autres branches réapparaissent dans le JSON embarqué.
+            etayage = await self.graph.etayage(investigation_id, branch_ids=branch_ids)
+            objectif = await self.graph.objective_etaye(investigation_id, branch_ids=branch_ids)
         if not include_proofs_meta:
             etayage = _strip_proofs(etayage)
         warnings: list[str] = []

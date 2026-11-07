@@ -60,6 +60,10 @@ class FetchResult(BaseModel):
     provenance: Provenance
     media_type: str = "application/json"
     extracted_text: Optional[str] = None
+    # Octets originaux reçus (audit F13, T2.2/T2.4) : distincts de `content` (texte normalisé).
+    # Ex. PDF : `content` = JSON de l'extraction texte, raw_bytes = le binaire PDF d'origine.
+    # L'empreinte de la preuve porte sur ces octets, pas sur la normalisation.
+    raw_bytes: Optional[bytes] = None
 
 
 class Connector(ABC):

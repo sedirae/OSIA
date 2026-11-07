@@ -80,10 +80,33 @@
   function uuid() { return (crypto.randomUUID ? crypto.randomUUID() : 'k-' + Date.now() + '-' + Math.random().toString(16).slice(2)); }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
+  function authError(msg) {
+    var e = $('auth-error');
+    if (e) { e.textContent = msg || ''; e.hidden = !msg; }
+  }
+  async function doLogin(token) {
+    // F11 / CON-05 : échange du jeton admin contre une session sess_* expirable et révocable.
+    // Le jeton admin lui-même n'est JAMAIS stocké côté client.
+    var resp = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token })
+    });
+    if (resp.status === 400) return { token: token, desktop: true }; // mode desktop : pas de session
+    if (!resp.ok) return { error: 'Jeton invalide' };
+    var data = await resp.json();
+    return { token: data.session_token };
+  }
   function bindAuth() {
     var form = $('auth-form');
-    if (form) form.addEventListener('submit', function () {
-      state.token = $('auth-token').value;
+    if (form) form.addEventListener('submit', async function (ev) {
+      ev.preventDefault(); // method="dialog" fermerait la boîte avant la réponse
+      var token = $('auth-token').value;
+      authError('');
+      var res;
+      try { res = await doLogin(token); } catch (e) { authError('Connexion impossible'); return; }
+      if (res.error) { authError(res.error); return; }
+      state.token = res.token;
       storage.setItem('osia_token', state.token);
       var d = $('auth-dialog');
       if (d && d.close) d.close();
@@ -91,8 +114,21 @@
     });
     var cancel = $('auth-cancel');
     if (cancel) cancel.addEventListener('click', function () { var d = $('auth-dialog'); if (d && d.close) d.close(); });
+    var logout = $('auth-logout');
+    if (logout) logout.addEventListener('click', async function () {
+      try { await api('/api/v1/auth/logout', { method: 'POST' }); } catch (e) { /* session déjà invalide */ }
+      state.token = '';
+      storage.removeItem('osia_token');
+      var d = $('auth-dialog');
+      if (d && d.close) d.close();
+      showAuth();
+    });
     var ab = $('auth-button');
-    if (ab) ab.addEventListener('click', showAuth);
+    if (ab) ab.addEventListener('click', function () {
+      var lo = $('auth-logout');
+      if (lo) lo.hidden = !state.token;
+      showAuth();
+    });
   }
 
   function parseRoute() {
