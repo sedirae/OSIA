@@ -28,20 +28,23 @@ def _apply_rlimits(limits: IsolationLimits) -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (limits.max_file_size_bytes, limits.max_file_size_bytes))
 
 
-async def run_isolated(cmd: list[str], limits: IsolationLimits | None = None, cwd: str | None = None) -> tuple[int, bytes, bytes]:
+async def run_isolated(cmd: list[str], limits: IsolationLimits | None = None, cwd: str | None = None, stdin_data: bytes | None = None) -> tuple[int, bytes, bytes]:
     """Exécute `cmd` dans un sous-processus avec rlimits (T5.2) et un timeout.
 
-    Retourne (returncode, stdout, stderr). Un dépassement de timeout tue le processus."""
+    `stdin_data` (optionnel) est écrit sur l'entrée standard du processus (ex. : document à
+    parser sans passer par un fichier). Retourne (returncode, stdout, stderr). Un dépassement
+    de timeout tue le processus."""
     limits = limits or IsolationLimits()
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         preexec_fn=lambda: _apply_rlimits(limits),
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=limits.timeout_seconds)
+        out, err = await asyncio.wait_for(proc.communicate(input=stdin_data), timeout=limits.timeout_seconds)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -49,11 +52,12 @@ async def run_isolated(cmd: list[str], limits: IsolationLimits | None = None, cw
     return proc.returncode or 0, out or b"", err or b""
 
 
-def run_isolated_sync(cmd: list[str], limits: IsolationLimits | None = None, cwd: str | None = None) -> subprocess.CompletedProcess:
-    """Variante synchrone (CLI) avec les mêmes rlimits."""
+def run_isolated_sync(cmd: list[str], limits: IsolationLimits | None = None, cwd: str | None = None, stdin_data: bytes | None = None) -> subprocess.CompletedProcess:
+    """Variante synchrone (CLI) avec les mêmes rlimits et le même support de stdin."""
     limits = limits or IsolationLimits()
     return subprocess.run(
         cmd,
+        input=stdin_data,
         capture_output=True,
         timeout=limits.timeout_seconds,
         cwd=cwd,

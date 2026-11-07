@@ -18,6 +18,7 @@ from .archive import (
     FORMAT_VERSION,
     ArchiveError,
     extract_payload,
+    is_valid_sha256,
     read_meta_and_manifest,
     sha256_bytes,
     write_archive,
@@ -26,6 +27,14 @@ from .crypto import CryptoError
 from .dump import EXCLUDABLE, ImportConflictError, dump_investigation, import_payload, detect_conflicts
 
 OSIA_VERSION = "0.1.0"
+
+
+def _proof_relpath(sha: str) -> str:
+    """Chemin relatif canonique d'une preuve, reconstruit UNIQUEMENT à partir du digest validé
+    (F01) : `proofs/sha256/<2>/<2>/<sha>` — identique au format de FileStore._content_path."""
+    if not is_valid_sha256(sha):
+        raise ArchiveError(f"empreinte de preuve invalide: {sha!r}")
+    return f"proofs/sha256/{sha[:2]}/{sha[2:4]}/{sha}"
 
 
 class ExchangeService:
@@ -50,12 +59,25 @@ class ExchangeService:
         return d
 
     async def _proofs_bytes(self, proof_rows: list[dict[str, Any]]) -> dict[str, bytes]:
+        """Lit les binaires de preuves UNIQUEMENT via le chemin canonique reconstruit depuis le
+        SHA-256 validé, confiné sous proofs_dir (audit F01) : le champ `path` (potentiellement
+        importé d'une archive non fiable) n'est jamais utilisé pour localiser un fichier hôte."""
         out: dict[str, bytes] = {}
+        proofs_root = self.paths.proofs_dir.resolve()
         for row in proof_rows:
-            sha = row["sha256"]
-            path = self.paths.data_dir / row["path"]
-            if path.exists():
-                out[sha] = path.read_bytes()
+            sha = row.get("sha256")
+            if not is_valid_sha256(sha):
+                continue  # preuve indisponible — jamais de lecture hors du stockage
+            path = self.paths.proofs_dir / "sha256" / sha[:2] / sha[2:4] / sha
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if not resolved.is_relative_to(proofs_root):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            out[sha] = path.read_bytes()
         return out
 
     async def export_investigation(
@@ -190,9 +212,11 @@ class ExchangeService:
             zf.close()
         staged = self._stage_proof_files(proofs)
         for row in payload.get("proof_files", []):
-            sha = row["sha256"]
-            if sha in staged:
-                row["path"] = staged[sha]["path"]
+            sha = row.get("sha256")
+            if is_valid_sha256(sha):
+                # F01 : jamais de chemin fourni par l'archive en base — chemin canonique
+                # reconstruit depuis le digest (preuve sans binaire = chemin canonique aussi).
+                row["path"] = staged[sha]["path"] if sha in staged else _proof_relpath(sha)
         report = await import_payload(self.pool, payload, mode=mode, on_conflict=on_conflict)
         inv_ids = [r["id"] for r in payload.get("investigations", [])]
         report["manifest_counts"] = manifest.get("counts")
@@ -207,22 +231,36 @@ class ExchangeService:
         return report
 
     def _stage_proof_files(self, proofs: dict[str, bytes]) -> dict[str, dict[str, Any]]:
-        """Phases 1-2 du protocole CON-02 (fichier avant base) pour les preuves importees."""
+        """Phases 1-2 du protocole CON-02 (fichier avant base) pour les preuves importees.
+
+        Confinement strict (audit F01) : le digest est validé (64 hex) puis re-vérifié contre le
+        contenu ; le chemin final est reconstruit UNIQUEMENT depuis le digest et sa résolution
+        doit rester sous proofs_dir AVANT toute écriture (un digest absolu ou une traversée est
+        rejeté sans créer aucun fichier) ; staging en `.part` puis déplacement atomique."""
         staged: dict[str, dict[str, Any]] = {}
         self.paths.incoming_dir.mkdir(parents=True, exist_ok=True)
+        proofs_root = self.paths.proofs_dir.resolve()
         for sha, content in proofs.items():
-            incoming = self.paths.incoming_dir / f"{sha}.part"
+            if not is_valid_sha256(sha):
+                raise ArchiveError(f"empreinte de preuve invalide à l'import: {sha!r}")
+            if sha256_bytes(content) != sha:
+                raise ArchiveError(f"empreinte ne correspond pas au contenu importé: {sha!r}")
             final = self.paths.proofs_dir / "sha256" / sha[:2] / sha[2:4] / sha
+            if not final.resolve().is_relative_to(proofs_root):
+                raise ArchiveError(f"chemin de preuve hors du stockage refusé: {sha!r}")
+            if final.is_symlink():
+                final.unlink()
+            incoming = self.paths.incoming_dir / f"{sha}.part"
             final.parent.mkdir(parents=True, exist_ok=True)
             with open(incoming, "wb") as handle:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
             if not final.exists():
-                os.rename(incoming, final)
+                os.replace(incoming, final)
             else:
                 incoming.unlink(missing_ok=True)
-            staged[sha] = {"path": str(final.relative_to(self.paths.data_dir)), "size_bytes": len(content)}
+            staged[sha] = {"path": _proof_relpath(sha), "size_bytes": len(content)}
         return staged
 
     async def list_exports(self) -> list[dict[str, Any]]:

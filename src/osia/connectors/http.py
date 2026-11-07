@@ -6,7 +6,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from ..netguard import NetworkGuard
+from ..netguard import NetworkGuard, RequestContext
+from ..nethttp import DEFAULT_MAX_BYTES, make_connector, read_bounded
 from .base import Connector, ConnectorManifest, FetchRequest, FetchResult, Provenance
 
 # Contrat d'un fetch brut : UNE requête sans suivre les redirections -> (status, headers, body).
@@ -24,13 +25,22 @@ def build_url(url: str, params: Optional[dict[str, Any]] = None) -> str:
     return url
 
 
-async def aiohttp_fetch(url: str) -> tuple[int, dict, bytes]:
-    """Fetch réel par aiohttp, sans suivre les redirections (gérées par le guard)."""
+async def aiohttp_fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple[int, dict, bytes]:
+    """Fetch réel par aiohttp, sans suivre les redirections (gérées par le guard).
+
+    Accepte un `ctx` (accepts_ctx, F02) : les IPs validées par le guard sont épinglées au
+    transport (anti-TOCTOU DNS) et la réponse est lue en streaming borné à `ctx.max_bytes`."""
     timeout = aiohttp.ClientTimeout(total=15)
-    async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "osia/0.1 (+investigation-osint)"}) as session:
+    pinned = ctx.pinned if ctx is not None else None
+    max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
+    connector = make_connector(pinned)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers={"User-Agent": "osia/0.1 (+investigation-osint)"}) as session:
         async with session.get(url, allow_redirects=False) as resp:
-            body = await resp.read()
+            body = await read_bounded(resp, max_bytes, resp.url.host or "")
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+
+
+aiohttp_fetch.accepts_ctx = True  # le guard lui transmet pinned/max_bytes/same_origin (F02)
 
 
 class HttpConnector(Connector):

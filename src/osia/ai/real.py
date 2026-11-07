@@ -9,7 +9,8 @@ import aiohttp
 from pydantic import BaseModel
 
 from ..config import Settings, is_local_host
-from ..netguard import NetworkGuard
+from ..netguard import NetworkGuard, RequestContext
+from ..nethttp import DEFAULT_MAX_BYTES, drop_credential_headers, make_connector, read_bounded
 from ..security import SecretStore
 from .base import AIAdapter
 from .simulated import SimulatedAIAdapter
@@ -33,25 +34,39 @@ class AIAdapterError(Exception):
         self.status = status
 
 
-def _aiohttp_post(payload: dict, headers: dict, timeout: int) -> Callable[[str], Awaitable[tuple[int, dict, bytes]]]:
-    """Fetch POST réel (aiohttp), sans suivre les redirections (gérées par le guard)."""
+def _aiohttp_post(payload: dict, headers: dict, timeout: int) -> Callable[..., Awaitable[tuple[int, dict, bytes]]]:
+    """Fetch POST réel (aiohttp), sans suivre les redirections (gérées par le guard).
 
-    async def fetch(url: str) -> tuple[int, dict, bytes]:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            async with session.post(url, json=payload, headers=headers, allow_redirects=False) as resp:
-                body = await resp.read()
+    Le fetch accepte un `ctx` (accepts_ctx, F02) : IPs validées épinglées au transport, lecture
+    bornée, et suppression des credentials (Authorization…) sur redirection inter-origines —
+    la clé API ne quitte jamais l'origine du fournisseur (T8.8)."""
+
+    async def fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple[int, dict, bytes]:
+        hdrs = drop_credential_headers(headers, ctx)
+        max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
+        connector = make_connector(ctx.pinned if ctx is not None else None)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), connector=connector) as session:
+            async with session.post(url, json=payload, headers=hdrs, allow_redirects=False) as resp:
+                body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
                 return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
 
+    fetch.accepts_ctx = True
     return fetch
 
 
-def _aiohttp_get(headers: dict, timeout: int) -> Callable[[str], Awaitable[tuple[int, dict, bytes]]]:
-    async def fetch(url: str) -> tuple[int, dict, bytes]:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            async with session.get(url, headers=headers, allow_redirects=False) as resp:
-                body = await resp.read()
+def _aiohttp_get(headers: dict, timeout: int) -> Callable[..., Awaitable[tuple[int, dict, bytes]]]:
+    """Fetch GET réel (aiohttp) ; mêmes garanties que `_aiohttp_post` (F02, T8.8)."""
+
+    async def fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple[int, dict, bytes]:
+        hdrs = drop_credential_headers(headers, ctx)
+        max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
+        connector = make_connector(ctx.pinned if ctx is not None else None)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), connector=connector) as session:
+            async with session.get(url, headers=hdrs, allow_redirects=False) as resp:
+                body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
                 return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
 
+    fetch.accepts_ctx = True
     return fetch
 
 
