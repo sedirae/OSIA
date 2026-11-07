@@ -93,10 +93,18 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     )
     if not decision.allowed:
         raise PolicyDeny(decision.reason or "refus_politique", "source")
-    await engine.policy.mark_in_flight(decision.op_id)
     started = time.monotonic()
     try:
         async with engine.external_semaphore:
+            # F04 : revalidation atomique immédiatement avant l'I/O (attente du sémaphore incluse)
+            recheck = await engine.policy.revalidate(decision.op_id, investigation_id=inv["id"])
+            if not recheck.allowed:
+                await engine.policy.cancel_op(decision.op_id, reason=recheck.reason or "revalidation_refusee")
+                raise PolicyDeny(recheck.reason or "revalidation_refusee", "source")
+            if not await engine.policy.mark_in_flight(decision.op_id):
+                # P2-1 : annulée entre la revalidation et l'envoi (stop) — jamais envoyée
+                await engine.policy.cancel_op(decision.op_id, reason="operation_annulee_avant_envoi")
+                raise PolicyDeny("operation_annulee_avant_envoi", "source")
             result = await asyncio.wait_for(
                 connector.fetch(FetchRequest(query=payload["query"])),
                 timeout=decision.timeout_seconds or 15,

@@ -134,7 +134,7 @@ class Engine:
         self.report = ReportService(self.pool, self.repo, graph=self.graph)
         self.exchange = ExchangeService(self.pool, self.repo, self.bus, self.filestore, self.settings.paths, report=self.report)
         self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
-        self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
+        self.orchestrator = Orchestrator(self.pool, self.repo, self.bus, budgets=self.budgets)
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
         self.techlog.log("engine", "engine.setup", detail={"mode": self.settings.mode})
 

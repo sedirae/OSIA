@@ -252,6 +252,22 @@ class BudgetManager:
                 investigation_id,
             ) or 0
         )
+        # F03 : séparation explicite estimé / réservé / constaté / incertain
+        estimated = int(
+            await self.pool.fetchval(
+                "SELECT COALESCE(SUM(cost_estimated_cents), 0) FROM external_ops "
+                "WHERE investigation_id = $1 AND state IN ('authorized','reserved','in_flight') AND cost_estimated_cents IS NOT NULL",
+                investigation_id,
+            ) or 0
+        )
+        uncertain = int(
+            await self.pool.fetchval(
+                "SELECT COALESCE(SUM(r.amount_cents), 0) FROM reservations r "
+                "JOIN external_ops o ON o.reservation_id = r.id "
+                "WHERE o.investigation_id = $1 AND o.state = 'uncertain' AND r.state = 'reserved'",
+                investigation_id,
+            ) or 0
+        )
         available = min(cap - used.get(scope, 0) for scope, cap in caps.items())
         # D3 §5.4 : avertissements à l'approche d'un plafond (seuil 80 %)
         warnings: list[str] = []
@@ -265,10 +281,43 @@ class BudgetManager:
             if pct >= 80:
                 warnings.append(f"plafond {scope} atteint à {pct} % ({u}/{cap} centimes)")
         return BudgetView(
-            estimated_cents=0,
+            estimated_cents=estimated,
             reserved_cents=max(reserved, 0),
             consumed_cents=consumed,
+            uncertain_cents=max(uncertain, 0),
             available_cents=max(available, 0),
             caps=caps,
             warnings=warnings,
         )
+
+    async def release_ops_reservations(self, investigation_id: str, *, note: str) -> int:
+        """Libère les enveloppes des opérations JAMAIS envoyées (authorized/reserved/cancelled)
+        d'une investigation — arrêt/pause (F04) : réservation passée à 'released' + ligne ledger,
+        en une transaction. Les opérations envoyées (in_flight) restent à réconcilier ('uncertain')."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    "SELECT DISTINCT reservation_id FROM external_ops "
+                    "WHERE investigation_id = $1 AND state IN ('authorized','reserved','cancelled') AND reservation_id IS NOT NULL",
+                    investigation_id,
+                )
+                released = 0
+                for row in rows:
+                    upd = await conn.fetchrow(
+                        "UPDATE reservations SET state = 'released', updated_at = now() "
+                        "WHERE id = $1 AND state = 'reserved' RETURNING *",
+                        row["reservation_id"],
+                    )
+                    if upd is None:
+                        continue
+                    await conn.execute(
+                        "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
+                        "VALUES ($1, $2, 'released', $3, $4, $5)",
+                        investigation_id,
+                        upd["id"],
+                        -upd["amount_cents"],
+                        _period(upd["created_at"]),
+                        note,
+                    )
+                    released += 1
+                return released

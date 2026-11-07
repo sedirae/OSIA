@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import asyncpg
 
@@ -17,6 +17,9 @@ from .models import (
 from .policies.limits import limits_from_profile_row, limits_from_record
 from .store.repo import Repo, _norm_row
 
+if TYPE_CHECKING:
+    from .policies.budgets import BudgetManager
+
 
 class Orchestrator:
     """Machine à états des investigations et branches (CON-03, T3.4, T4.3, T4.6).
@@ -25,10 +28,11 @@ class Orchestrator:
     étayé est automatique, toute prolongation exige une branche avec validation explicite.
     """
 
-    def __init__(self, pool: asyncpg.Pool, repo: Repo, bus: EventBus):
+    def __init__(self, pool: asyncpg.Pool, repo: Repo, bus: EventBus, budgets: "BudgetManager | None" = None):
         self.pool = pool
         self.repo = repo
         self.bus = bus
+        self.budgets = budgets
 
     async def start_investigation(self, req: CreateInvestigationRequest) -> asyncpg.Record:
         if req.idempotency_key:
@@ -180,11 +184,20 @@ class Orchestrator:
                     "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
                     investigation_id,
                 )
+                # F04 : distinguer jamais-envoyé (authorized/reserved -> cancelled + enveloppe
+                # libérée) et envoyé (in_flight -> uncertain, à réconcilier, jamais relancé).
                 await conn.execute(
-                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
-                    "WHERE investigation_id = $1 AND state IN ('reserved','in_flight')",
+                    "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
                     investigation_id,
                 )
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state = 'in_flight'",
+                    investigation_id,
+                )
+        if self.budgets is not None:
+            await self.budgets.release_ops_reservations(investigation_id, note=f"arrêt ({reason.value}) : opérations jamais envoyées")
         if matched:
             await self.bus.emit(
                 type="investigation.stopped",
@@ -200,11 +213,19 @@ class Orchestrator:
             "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
             investigation_id,
         )
+        # F04 : idem stop — jamais-envoyé libéré, envoyé passé en uncertain
         await self.pool.execute(
-            "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
-            "WHERE investigation_id = $1 AND state IN ('reserved','in_flight')",
+            "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
             investigation_id,
         )
+        await self.pool.execute(
+            "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+            "WHERE investigation_id = $1 AND state = 'in_flight'",
+            investigation_id,
+        )
+        if self.budgets is not None:
+            await self.budgets.release_ops_reservations(investigation_id, note="suspension : opérations jamais envoyées")
         await self.bus.emit(type="investigation.suspended", investigation_id=investigation_id, payload={})
         return inv
 
