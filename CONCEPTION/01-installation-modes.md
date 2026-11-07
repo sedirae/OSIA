@@ -6,7 +6,7 @@
 ## 1. Distribution et paquetage
 
 - Moteur distribué comme **package Python installable** (`pyproject.toml`, layout `src/osia`), installable par `pip`/`pipx` dans un venv dédié sur toute distribution Linux commune (Debian 12+, Ubuntu 24.04+, Fedora 40+ testés ; aucune dépendance native compilée requise côté moteur).
-- Le **frontend web est un extra facultatif** (`pip install "osia[web]"`) ; sans lui, le moteur, la CLI et l'API restent pleinement utilisables (EXEC-03). Aucun Docker/Podman requis (T5.2, CONCEPTION-RESTANTE §1).
+- Le **frontend web est inclus dans le paquet de base** (`pip install osia`) : assets et routes servis par l'API, aucune dépendance supplémentaire. L'extra `osia[web]` existe toujours dans `pyproject.toml` mais est vide (compatibilité avec la documentation antérieure) — le moteur, la CLI et l'API restent utilisables sans aucun frontend (EXEC-03). Aucun Docker/Podman requis (T5.2, CONCEPTION-RESTANTE §1). *(Corrigé audit F16 : la conception promettait un extra `osia[web]` qui n'existait pas, alors que le web était de toute façon toujours inclus.)*
 - Entrées : `osia` (CLI, `python -m osia`) et `osia-serve` (service moteur + API).
 
 ## 2. Emplacements (T2.3, personnalisables)

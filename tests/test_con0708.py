@@ -6,6 +6,7 @@ Tous les tests utilisent des fixtures JSON injectées via `fetch_fn` : aucun app
 
 import io
 import json
+import socket
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -200,7 +201,15 @@ async def test_tout_fetch_passe_par_le_guard():
         seen.append(url)
         return 200, {"content-type": "application/json"}, json.dumps(RECHERCHE_FIXTURE).encode()
 
-    guard = NetworkGuard(NetworkPolicy(allowed_domains={"recherche-entreprises.api.gouv.fr"}, min_interval_seconds=0))
+    # F16 : aucun DNS public réel dans un test présenté « hors ligne » — resolver injecté
+    # (IP de documentation TEST-NET-1, RFC 5737), comme dans test_con06.
+    async def fake_resolver(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", port))]
+
+    guard = NetworkGuard(
+        NetworkPolicy(allowed_domains={"recherche-entreprises.api.gouv.fr"}, min_interval_seconds=0),
+        resolver=fake_resolver,
+    )
     c = RechercheEntreprisesConnector(netguard=guard, fetch_fn=fetch)
     res = await c.fetch(FetchRequest(query="EDF"))
     assert res.provenance.http_status == 200

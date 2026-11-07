@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from ..config import ConfigError, Settings, is_local_host
 from ..netguard import NetworkGuard, RequestContext
-from ..nethttp import DEFAULT_MAX_BYTES, drop_credential_headers, make_connector, read_bounded
+from ..nethttp import DEFAULT_MAX_BYTES, DEFAULT_SESSION_POOL, drop_credential_headers, pool_key, read_bounded
 from ..security import SecretStore
 from .base import AIAdapter
 from .simulated import SimulatedAIAdapter
@@ -44,11 +44,14 @@ def _aiohttp_post(payload: dict, headers: dict, timeout: int) -> Callable[..., A
     async def fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple[int, dict, bytes]:
         hdrs = drop_credential_headers(headers, ctx)
         max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
-        connector = make_connector(ctx.pinned if ctx is not None else None)
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), connector=connector) as session:
-            async with session.post(url, json=payload, headers=hdrs, allow_redirects=False) as resp:
-                body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
-                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+        pinned = ctx.pinned if ctx is not None else None
+        # Réserve audit PR#18 : session poolée (clé = host+IPs épinglées, audit PR#24 P3-c)
+        # au lieu d'une par appel.
+        key = pool_key(pinned, fallback=urlparse(url).hostname or "default")
+        session = await DEFAULT_SESSION_POOL.session(key, pinned=pinned, timeout=aiohttp.ClientTimeout(total=timeout))
+        async with session.post(url, json=payload, headers=hdrs, allow_redirects=False) as resp:
+            body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
 
     fetch.accepts_ctx = True
     return fetch
@@ -60,11 +63,14 @@ def _aiohttp_get(headers: dict, timeout: int) -> Callable[..., Awaitable[tuple[i
     async def fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple[int, dict, bytes]:
         hdrs = drop_credential_headers(headers, ctx)
         max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
-        connector = make_connector(ctx.pinned if ctx is not None else None)
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout), connector=connector) as session:
-            async with session.get(url, headers=hdrs, allow_redirects=False) as resp:
-                body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
-                return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+        pinned = ctx.pinned if ctx is not None else None
+        # Réserve audit PR#18 : session poolée (clé = host+IPs épinglées, audit PR#24 P3-c)
+        # au lieu d'une par appel.
+        key = pool_key(pinned, fallback=urlparse(url).hostname or "default")
+        session = await DEFAULT_SESSION_POOL.session(key, pinned=pinned, timeout=aiohttp.ClientTimeout(total=timeout))
+        async with session.get(url, headers=hdrs, allow_redirects=False) as resp:
+            body = await read_bounded(resp, max_bytes, urlparse(url).hostname or "")
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
 
     fetch.accepts_ctx = True
     return fetch

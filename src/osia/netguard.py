@@ -32,6 +32,32 @@ DEFAULT_BLOCKED_NETWORKS = [
 
 _ALLOWED_SCHEMES = {"http", "https"}
 
+# Suffixes publics usuels (liste courte, hors ligne — pas de Public Suffix List embarquée) :
+# un domaine de cette liste n'est PAS un domaine enregistrable ; l'autoriser ouvrirait
+# l'allowlist à n'importe quel site sous ce suffixe (ex. autoriser "co.uk" ouvrirait
+# "evil.co.uk"). Réserve audit PR#21 P3-3 : heuristique de suffixe enregistrable.
+# Limites assumées (audit PR#24 P3-d) : les TLD nus ("com", "uk") et les suffixes publics
+# hors liste ("github.io"…) restent autorisables — la liste est une heuristique courte,
+# pas une PSL complète.
+_PUBLIC_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "ltd.uk", "me.uk", "net.uk", "sch.uk",
+    "com.au", "net.au", "org.au", "co.nz", "co.za", "com.br", "com.mx", "com.ar",
+    "com.cn", "com.tw", "co.jp", "or.jp", "ne.jp", "co.kr", "com.sg", "com.my",
+    "co.in", "co.th", "com.tr", "com.ua", "com.pl", "com.ru", "org.ru", "co.il",
+}
+
+
+def _check_registrable(domain: str) -> str:
+    d = domain.lower().rstrip(".")
+    if not d:
+        raise ValueError("domaine vide interdit dans la politique réseau")
+    if d in _PUBLIC_SUFFIXES:
+        raise ValueError(
+            f"domaine {d!r} est un suffixe public, pas un domaine enregistrable : "
+            "l'autoriser ouvrirait l'allowlist à tout site sous ce suffixe"
+        )
+    return d
+
 
 @dataclass
 class NetworkPolicy:
@@ -44,6 +70,12 @@ class NetworkPolicy:
     timeout_seconds: float = 15.0
     max_bytes: int = 10 * 1024 * 1024  # 10 Mo par réponse (V1.4 : 15 s / requête HTTP)
     min_interval_seconds: float = 1.0  # rate limit par domaine
+
+    def __post_init__(self) -> None:
+        # P3-3 (audit PR#21) : les entrées d'allowlist/denylist doivent être des domaines
+        # enregistrables — un suffixe public (co.uk…) est rejeté explicitement.
+        self.allowed_domains = {_check_registrable(d) for d in self.allowed_domains}
+        self.denied_domains = {_check_registrable(d) for d in self.denied_domains}
 
     def domain_allowed(self, host: str) -> bool:
         h = host.lower().rstrip(".")

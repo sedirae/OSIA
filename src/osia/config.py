@@ -112,7 +112,9 @@ class Settings:
     net_allow_domains: list[str] = field(default_factory=list)
     net_deny_domains: list[str] = field(default_factory=list)
     net_max_bytes: int = 10 * 1024 * 1024
-    secrets_persist: bool = True
+    # T5.5 / D2 : secrets en mémoire par défaut, coffre persistant UNIQUEMENT sur opt-in
+    # explicite (audit F16 : l'ancien défaut True contredisait le cadrage).
+    secrets_persist: bool = False
     paid_calls_enabled: bool = False
     global_monthly_cap_cents: int = 500
     timezone: str = "UTC"
@@ -167,7 +169,8 @@ class Settings:
         maxb = os.environ.get("OSIA_NET_MAX_BYTES")
         if maxb:
             settings.net_max_bytes = int(maxb)
-        persist = os.environ.get("OSIA_SECRETS_PERSIST", "1").strip().lower()
+        # T5.5 / D2 : défaut "0" — aucune persistance de secret sans opt-in explicite (audit F16).
+        persist = os.environ.get("OSIA_SECRETS_PERSIST", "0").strip().lower()
         settings.secrets_persist = persist in ("1", "true", "yes", "on")
         paid = os.environ.get("OSIA_PAID_CALLS_ENABLED", "").strip().lower()
         if paid:

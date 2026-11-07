@@ -232,8 +232,12 @@ class Orchestrator:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 matched, inv = await self._stop_in_conn(conn, investigation_id, reason)
-        if self.budgets is not None:
-            await self.budgets.release_ops_reservations(investigation_id, note=f"arrêt ({reason.value}) : opérations jamais envoyées")
+                if self.budgets is not None:
+                    # Réserve audit PR#19 P3-6 : libération DANS la transaction — un crash
+                    # entre les deux ne laisse pas de réservations orphelines.
+                    await self.budgets.release_ops_reservations_in_conn(
+                        conn, investigation_id, note=f"arrêt ({reason.value}) : opérations jamais envoyées"
+                    )
         if matched:
             await self.bus.emit(
                 type="investigation.stopped",
@@ -243,32 +247,42 @@ class Orchestrator:
         return inv
 
     async def suspend(self, investigation_id: str) -> asyncpg.Record:
-        inv = await self.repo.set_investigation_state(investigation_id, InvestigationState.SUSPENDED.value)
         # F08 : une pause n'est PAS une annulation définitive — les tâches en file/en cours
         # passent 'interrupted' (re-mises en file par resume()), distinct de 'cancelled' (stop).
-        await self.pool.execute(
-            "UPDATE tasks SET state = 'interrupted', updated_at = now() "
-            "WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
-            investigation_id,
-        )
-        await self.pool.execute(
-            "UPDATE branches SET state = 'suspended', updated_at = now() "
-            "WHERE investigation_id = $1 AND state = 'running'",
-            investigation_id,
-        )
-        # F04 : idem stop — jamais-envoyé libéré, envoyé passé en uncertain
-        await self.pool.execute(
-            "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
-            "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
-            investigation_id,
-        )
-        await self.pool.execute(
-            "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
-            "WHERE investigation_id = $1 AND state = 'in_flight'",
-            investigation_id,
-        )
-        if self.budgets is not None:
-            await self.budgets.release_ops_reservations(investigation_id, note="suspension : opérations jamais envoyées")
+        # P3-6 (audit PR#19) : état + libération des réservations dans UNE transaction —
+        # aucun état intermédiaire observable (crash = rollback complet).
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = _norm_row(
+                    await conn.fetchrow(
+                        "UPDATE investigations SET state = $2, stop_reason = NULL, updated_at = now() WHERE id = $1 RETURNING *",
+                        investigation_id,
+                        InvestigationState.SUSPENDED.value,
+                    )
+                )
+                await conn.execute(
+                    "UPDATE tasks SET state = 'interrupted', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
+                    investigation_id,
+                )
+                await conn.execute(
+                    "UPDATE branches SET state = 'suspended', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state = 'running'",
+                    investigation_id,
+                )
+                # F04 : idem stop — jamais-envoyé libéré, envoyé passé en uncertain
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
+                    investigation_id,
+                )
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+                    "WHERE investigation_id = $1 AND state = 'in_flight'",
+                    investigation_id,
+                )
+                if self.budgets is not None:
+                    await self.budgets.release_ops_reservations_in_conn(conn, investigation_id, note="suspension : opérations jamais envoyées")
         await self.bus.emit(type="investigation.suspended", investigation_id=investigation_id, payload={})
         return inv
 
@@ -341,10 +355,11 @@ class Orchestrator:
                 if pending:
                     return
                 matched, _inv = await self._stop_in_conn(conn, investigation_id, StopReason.EXHAUSTED)
-        if self.budgets is not None:
-            await self.budgets.release_ops_reservations(
-                investigation_id, note=f"épuisement ({StopReason.EXHAUSTED.value}) : opérations jamais envoyées"
-            )
+                if self.budgets is not None:
+                    # P3-6 (audit PR#19) : libération DANS la transaction du stop.
+                    await self.budgets.release_ops_reservations_in_conn(
+                        conn, investigation_id, note=f"épuisement ({StopReason.EXHAUSTED.value}) : opérations jamais envoyées"
+                    )
         if matched:
             await self.bus.emit(
                 type="investigation.stopped",
