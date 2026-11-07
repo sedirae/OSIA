@@ -148,6 +148,12 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
     connector.fixtures = spec.get("fixtures", {})
     connector.fail_on = set(spec.get("fail_on", []))
     connector.calls.clear()
+    # F05 : mode démo explicitement visible — seuls les connecteurs simulés restent actifs pendant
+    # la recette hors ligne ; la sélection automatique retombe donc sur simulated.web (et le
+    # relevé le montre via source_calls), jamais sur un connecteur réel en production.
+    real_ids = [e["id"] for e in engine.registry.list() if not e["id"].startswith("simulated.")]
+    for cid in real_ids:
+        engine.registry.set_enabled(cid, False)
     # Rejouabilité (T3.14) : le cache technique des requêtes source (B-ACC-06) est réinitialisé
     # avant chaque scénario — un hit cache court-circuite la chaîne (pas de preuve, pas de
     # tâche synthesize) et casserait le relevé comme la comparaison entre exécutions.
@@ -190,6 +196,8 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
                 "separated": set(releve["entities"]).isdisjoint(releve2["entities"]),
             }
     finally:
+        for cid in real_ids:
+            engine.registry.set_enabled(cid, True)
         if manage_engine:
             engine.scheduler.stop()
             if engine._runner:
