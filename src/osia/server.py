@@ -17,6 +17,20 @@ async def run_server(settings: Settings) -> None:
     await engine.setup()
     await ensure_server_credentials(engine)
     recovery = await engine.start()
+    if settings.version_check_enabled:
+        # EXEC-06 : notification de version au démarrage — best-effort, ne lève jamais.
+        from .version import fetch_latest_version, is_newer, __version__
+
+        engine.latest_version = await fetch_latest_version(url=settings.version_check_url)
+        engine.techlog.log(
+            "version.check",
+            "version.check",
+            detail={
+                "current": __version__,
+                "latest": engine.latest_version,
+                "update_available": is_newer(engine.latest_version),
+            },
+        )
     app = create_app(engine)
     ssl_certfile = ssl_keyfile = None
     if settings.tls_enabled:

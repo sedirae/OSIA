@@ -30,6 +30,9 @@ class Engine:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.pool = None
+        # EXEC-06 : dernière version connue (renseignée par le check de démarrage,
+        # exposé via GET /api/v1/system/version) — None = non vérifié / indisponible.
+        self.latest_version: str | None = None
         self.repo: Repo
         self.bus: EventBus
         self.budgets: BudgetManager

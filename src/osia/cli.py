@@ -35,7 +35,25 @@ async def _cmd_db_migrate(args) -> int:
 async def _cmd_serve(args) -> int:
     from .server import run_server
 
-    await run_server(_settings())
+    settings = _settings()
+    if getattr(args, "no_web_ui", False):
+        # EXEC-03 : frontend web facultatif — mode API seul pour ce lancement.
+        settings.web_ui_enabled = False
+    await run_server(settings)
+    return 0
+
+
+async def _cmd_version(args) -> int:
+    """EXEC-06 : version courante ; `--check` interroge la dernière version publiée
+    (best-effort, via le NetworkGuard — aucun échec réseau ne fait échouer la commande)."""
+    from .version import __version__, fetch_latest_version, is_newer
+
+    if getattr(args, "check", False):
+        settings = _settings()
+        latest = await fetch_latest_version(url=settings.version_check_url)
+        print(json.dumps({"current": __version__, "latest": latest, "update_available": is_newer(latest)}, ensure_ascii=False))
+    else:
+        print(__version__)
     return 0
 
 
@@ -690,7 +708,12 @@ def main(argv: list[str] | None = None) -> int:
     db_sub.add_parser("migrate", help="appliquer les migrations").set_defaults(func=_cmd_db_migrate)
 
     serve = sub.add_parser("serve", help="démarrer le moteur et l'API")
+    serve.add_argument("--no-web-ui", action="store_true", help="EXEC-03 : ne servir que l'API (aucune route ni asset web)")
     serve.set_defaults(func=_cmd_serve)
+
+    ver = sub.add_parser("version", help="afficher la version (EXEC-06)")
+    ver.add_argument("--check", action="store_true", help="interroger aussi la dernière version publiée (notification de mise à jour)")
+    ver.set_defaults(func=_cmd_version)
 
     inv = sub.add_parser("investigation", help="gérer les investigations")
     inv_sub = inv.add_subparsers(dest="inv_command", required=True)

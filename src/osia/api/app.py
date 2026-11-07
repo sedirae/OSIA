@@ -17,6 +17,7 @@ from ..engine import Engine
 from ..exchange import ArchiveError, CryptoError, ImportConflictError
 from ..exchange.service import ExchangeService
 from ..ids import new_id
+from ..version import __version__, is_newer
 from ..models import (
     AIFallbackRequest,
     AITestRequest,
@@ -45,15 +46,20 @@ from ..models import (
 )
 
 
-def create_app(engine: Engine) -> FastAPI:
+def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
+    """EXEC-03 : le frontend web est facultatif. `web_ui=False` (ou le réglage
+    `web_ui_enabled=False`, ex. `osia serve --no-web-ui`) ne sert AUCUNE route web
+    (`/` et `/static/*` -> 404) ; l'API `/api/v1/*` reste pleinement servie, avec les
+    mêmes protections d'authentification (T5.7)."""
     app = FastAPI(
         title="OSIA",
-        version="0.1.0",
+        version=__version__,
         openapi_url="/api/v1/openapi.json",
         docs_url=None,
         redoc_url=None,
     )
     settings = engine.settings
+    serve_web_ui = settings.web_ui_enabled if web_ui is None else web_ui
 
     def _client(request: Request) -> str | None:
         return request.client.host if request.client else None
@@ -114,7 +120,20 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict:
         await require_auth(request)
-        return {"status": "ok", "version": "0.1.0", "mode": settings.mode}
+        return {"status": "ok", "version": __version__, "mode": settings.mode}
+
+    @app.get("/api/v1/system/version")
+    async def system_version(request: Request) -> dict:
+        """EXEC-06 : notification de version — version courante + dernière version connue
+        (check best-effort au démarrage du serveur ; None si non vérifié/indisponible)."""
+        await require_auth(request)
+        latest = engine.latest_version
+        return {
+            "current": __version__,
+            "latest": latest,
+            "update_available": is_newer(latest),
+            "check_enabled": settings.version_check_enabled,
+        }
 
     @app.post("/api/v1/auth/login")
     async def login(request: Request, body: LoginRequest) -> dict:
@@ -825,6 +844,10 @@ def create_app(engine: Engine) -> FastAPI:
         return result
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
+
+    if not serve_web_ui:
+        # EXEC-03 : frontend facultatif — mode API seul, aucune route ni asset web servis.
+        return app
 
     @app.get("/", include_in_schema=False)
     async def index(request: Request):

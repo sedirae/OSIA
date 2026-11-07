@@ -115,6 +115,13 @@ class Settings:
     # T5.5 / D2 : secrets en mémoire par défaut, coffre persistant UNIQUEMENT sur opt-in
     # explicite (audit F16 : l'ancien défaut True contredisait le cadrage).
     secrets_persist: bool = False
+    # EXEC-03 : le frontend web est facultatif — l'activation des routes / et /static/*
+    # est pilotée par ce réglage (CLI : `osia serve --no-web-ui`). L'API reste servie.
+    web_ui_enabled: bool = True
+    # EXEC-06 : notification de version — check au démarrage du serveur (best-effort,
+    # via le NetworkGuard) ; désactivable par OSIA_VERSION_CHECK=0.
+    version_check_enabled: bool = True
+    version_check_url: str = "https://pypi.org/pypi/osia/json"
     paid_calls_enabled: bool = False
     global_monthly_cap_cents: int = 500
     timezone: str = "UTC"
@@ -199,6 +206,15 @@ class Settings:
         mout = os.environ.get("OSIA_AI_MAX_OUTPUT_TOKENS")
         if mout:
             settings.ai_max_output_tokens = int(mout)
+        webui = os.environ.get("OSIA_WEB_UI_ENABLED")
+        if webui:
+            settings.web_ui_enabled = webui.strip().lower() in ("1", "true", "yes", "on")
+        vcheck = os.environ.get("OSIA_VERSION_CHECK")
+        if vcheck:
+            settings.version_check_enabled = vcheck.strip().lower() in ("1", "true", "yes", "on")
+        vurl = os.environ.get("OSIA_VERSION_CHECK_URL")
+        if vurl:
+            settings.version_check_url = vurl.strip()
         return settings
 
     @property
