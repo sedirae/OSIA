@@ -60,7 +60,10 @@ async def fetch_latest_version(
 
 
 def is_newer(latest: Optional[str], current: str = __version__) -> bool:
-    """Comparaison de versions sémantiques simples (x.y.z) — False si latest inconnu."""
+    """Comparaison de versions sémantiques simples (x.y.z) — False si latest inconnu.
+
+    Limite assumée (audit PR#25 P3-3) : les suffixes pre-release ne sont pas distingués
+    ("0.1.0-rc1" est traité comme "0.1.0" -> non annoncé comme mise à jour, conservateur)."""
     if not latest:
         return False
 

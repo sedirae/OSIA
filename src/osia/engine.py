@@ -54,6 +54,8 @@ class Engine:
         self.health: ConnectorHealthChecker
         self.external_semaphore: asyncio.Semaphore
         self._runner: asyncio.Task | None = None
+        # EXEC-06 : tâche de fond du check de version au démarrage (await dans stop()).
+        self._version_check_task: asyncio.Task | None = None
 
     async def setup(self) -> None:
         self.settings.paths.ensure()
@@ -152,6 +154,11 @@ class Engine:
         self.scheduler.stop()
         if self._runner:
             await self._runner
+        if self._version_check_task:
+            try:
+                await self._version_check_task
+            except Exception:
+                pass  # best-effort : le check de version ne doit jamais empêcher l'arrêt
         if self.pool:
             await self.pool.close()
         # Audit PR#24 P3-c : fermer les sessions HTTP poolées à l'arrêt (évite les

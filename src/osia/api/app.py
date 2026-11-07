@@ -50,7 +50,10 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     """EXEC-03 : le frontend web est facultatif. `web_ui=False` (ou le réglage
     `web_ui_enabled=False`, ex. `osia serve --no-web-ui`) ne sert AUCUNE route web
     (`/` et `/static/*` -> 404) ; l'API `/api/v1/*` reste pleinement servie, avec les
-    mêmes protections d'authentification (T5.7)."""
+    mêmes protections d'authentification (T5.7).
+
+    Précédence (audit PR#25 P3-1) : un paramètre `web_ui` explicite prime toujours le
+    réglage `web_ui_enabled` (`web_ui=None` = suivre le réglage)."""
     app = FastAPI(
         title="OSIA",
         version=__version__,
