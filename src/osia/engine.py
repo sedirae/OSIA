@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from .ai import AIBroker, SimulatedAIAdapter
+from .ai import AIBroker, ChatCompletionsAdapter, build_ai_adapters
 from .backup import BackupService
 from .config import Settings
 from .connectors import ConnectorHealthChecker, ConnectorRegistry, SimulatedConnector
@@ -65,36 +65,22 @@ class Engine:
         self.policy = PolicyEngine(self.pool, self.budgets)
         self.filestore = FileStore(self.pool, self.settings.paths)
         self.external_semaphore = asyncio.Semaphore(2)
-        adapter = SimulatedAIAdapter()
-        self.broker = AIBroker(
-            self.policy,
-            self.bus,
-            {"simulated": adapter},
-            role_models={"planning": "simulated", "extraction": "simulated", "synthesis": "simulated"},
-            allowed_fallbacks={},
-            semaphore=self.external_semaphore,
-        )
-        for ad in self.broker.adapters.values():
-            self.policy.allow_target(f"{ad.provider}:{ad.model}")
+        self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
+        self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
+        self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
         connector = SimulatedConnector()
         self.registry.register(connector)
         self.policy.allow_target(connector.manifest.id)
-        self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
-        self.report = ReportService(self.pool, self.repo, graph=self.graph)
-        self.exchange = ExchangeService(self.pool, self.repo, self.bus, self.filestore, self.settings.paths, report=self.report)
-        self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
-        self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
-        self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
-        self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
-        self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
+        # CON-11 (V1.3) : adaptateurs IA réels selon la configuration ; CON-07/CON-08 : connecteurs
+        # réels V1.2. Leurs domaines alimentent l'allowlist du NetworkGuard AVANT sa création.
+        ai_adapters, role_models, ai_domains = build_ai_adapters(self.settings, self.secrets)
+        real_connectors = build_real_connectors()
         allowed_domains = set(self.settings.net_allow_domains)
         for entry in self.registry.list():
             allowed_domains.update(entry.get("domains", []))
-        # Connecteurs réels V1.2 (CON-07/CON-08, PERIMETRE-V1 §V1.2) : leurs domaines alimentent
-        # l'allowlist du NetworkGuard avant sa création, puis reçoivent le guard (T5.4).
-        real_connectors = build_real_connectors()
         for c in real_connectors:
             allowed_domains.update(c.manifest.domains)
+        allowed_domains.update(ai_domains)
         self.netguard = NetworkGuard(
             NetworkPolicy(
                 allowed_domains=allowed_domains,
@@ -107,8 +93,31 @@ class Engine:
             c.netguard = self.netguard
             self.registry.register(c)
             self.policy.allow_target(c.manifest.id)
+        for ad in ai_adapters.values():
+            if isinstance(ad, ChatCompletionsAdapter) and not getattr(ad, "is_local", False):
+                ad.netguard = self.netguard  # host externe (ex. api.mistral.ai) : guard T5.4
+            self.policy.allow_target(f"{ad.provider}:{ad.model}")
+        # Repli local -> cloud (T8.9, V1.3, D2 §4.4) : UNIQUEMENT si autorisation de transmission
+        # persistée ; le repli payant passe en outre par la réservation budgétaire (T8.4).
+        fallback_allowed = await self.repo.get_setting("allow_ai_fallback_local_to_cloud", False)
+        allowed_fallbacks = {}
+        if fallback_allowed and "local" in ai_adapters and "mistral" in ai_adapters:
+            allowed_fallbacks = {"local": "mistral"}
+        self.broker = AIBroker(
+            self.policy,
+            self.bus,
+            ai_adapters,
+            role_models=role_models,
+            allowed_fallbacks=allowed_fallbacks,
+            semaphore=self.external_semaphore,
+        )
         self.health = ConnectorHealthChecker(self.registry)
-        self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
+        self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
+        self.report = ReportService(self.pool, self.repo, graph=self.graph)
+        self.exchange = ExchangeService(self.pool, self.repo, self.bus, self.filestore, self.settings.paths, report=self.report)
+        self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
+        self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
+        self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
 
     async def start(self) -> dict:
         recovery = await self.scheduler.recover()

@@ -122,6 +122,20 @@ class HealthCheckRequest(BaseModel):
     probe_query: Optional[str] = None
 
 
+class AIFallbackRequest(BaseModel):
+    """CON-11 / T8.8/T8.9 + V1.3 + D2 §4.4 : autorise ou révoque le repli local -> cloud.
+    Le repli vers un fournisseur payant exige en outre les appels payants activés et une
+    enveloppe budgétaire (T8.4) — vérifié à chaque appel par le PolicyEngine."""
+
+    enabled: bool
+
+
+class AITestRequest(BaseModel):
+    """CON-11 / D2 §4.2 : test de connexion explicite d'un fournisseur (clé d'adaptateur)."""
+
+    provider_key: str
+
+
 class Event(BaseModel):
     id: int
     investigation_id: Optional[str]

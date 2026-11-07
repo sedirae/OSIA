@@ -17,6 +17,8 @@ from ..exchange import ArchiveError, CryptoError, ImportConflictError
 from ..exchange.service import ExchangeService
 from ..ids import new_id
 from ..models import (
+    AIFallbackRequest,
+    AITestRequest,
     ApiError,
     BackupCreateRequest,
     CreateBranchRequest,
@@ -629,6 +631,61 @@ def create_app(engine: Engine) -> FastAPI:
             {"connector_id": body.connector_id, "states": {r.connector_id: r.state.value for r in reports}},
         )
         return {"reports": [_health_json(r) for r in reports]}
+
+    @app.get("/api/v1/ai/providers")
+    async def ai_providers(request: Request) -> dict:
+        """CON-11 / D2 §4.2 : fournisseurs IA enregistrés, modèles par rôle, replis autorisés.
+        Aucune clé API n'est exposée (T8.8, D2 §4.3)."""
+        await require_auth(request)
+        roles_by_key: dict[str, list[str]] = {}
+        for role, key in engine.broker.role_models.items():
+            roles_by_key.setdefault(key, []).append(role)
+        providers = [
+            {
+                "key": key,
+                "provider": ad.provider,
+                "model": ad.model,
+                "paid": ad.paid,
+                "cost_per_call_cents": ad.cost_per_call_cents,
+                "roles": roles_by_key.get(key, []),
+                "fallback_to": engine.broker.allowed_fallbacks.get(key),
+            }
+            for key, ad in engine.broker.adapters.items()
+        ]
+        return {
+            "providers": providers,
+            "fallback_local_to_cloud_authorized": bool(engine.broker.allowed_fallbacks.get("local")),
+        }
+
+    @app.post("/api/v1/ai/fallback")
+    async def ai_fallback(request: Request, body: AIFallbackRequest) -> dict:
+        """CON-11 / T8.8/T8.9 + V1.3 + D2 §4.4 : autorise ou révoque le repli local -> cloud
+        (autorisation de transmission persistée). Sans cette autorisation, aucun repli n'est
+        possible ; avec, le repli payant reste soumis à la réservation budgétaire (T8.4)."""
+        await require_auth(request)
+        await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", body.enabled)
+        if body.enabled and "local" in engine.broker.adapters and "mistral" in engine.broker.adapters:
+            engine.broker.allowed_fallbacks["local"] = "mistral"
+        else:
+            engine.broker.allowed_fallbacks.pop("local", None)
+        _audit_op("op.ai.fallback.toggle", request, {"enabled": body.enabled})
+        return {"allow_ai_fallback_local_to_cloud": body.enabled, "fallbacks": dict(engine.broker.allowed_fallbacks)}
+
+    @app.post("/api/v1/ai/test")
+    async def ai_test(request: Request, body: AITestRequest) -> dict:
+        """CON-11 / D2 §4.2 : test de connexion explicite d'un fournisseur (GET /models, non
+        facturé). Aucun appel payant n'est lancé ici (B6) ; la clé n'est jamais journalisée."""
+        await require_auth(request)
+        adapter = engine.broker.adapters.get(body.provider_key)
+        if adapter is None:
+            raise ApiError("not_found", "fournisseur inconnu", 404)
+        try:
+            result = await adapter.ping()
+        except Exception as exc:
+            engine.audit.log("op.ai.test", "failure", detail={"provider_key": body.provider_key}, client=_client(request))
+            raise ApiError("ai_test_failed", f"test de connexion échoué : {exc}", 502) from exc
+        _audit_op("op.ai.test", request, {"provider_key": body.provider_key, "ok": True})
+        return result
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
 

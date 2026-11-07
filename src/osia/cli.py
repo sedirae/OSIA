@@ -392,6 +392,69 @@ async def _cmd_connector_toggle(args) -> int:
     return 0
 
 
+async def _cmd_ai_providers(args) -> int:
+    """CON-11 / D2 §4.2 : fournisseurs IA enregistrés, modèles par rôle, replis (sans clés)."""
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    roles_by_key: dict[str, list[str]] = {}
+    for role, key in engine.broker.role_models.items():
+        roles_by_key.setdefault(key, []).append(role)
+    for key, ad in engine.broker.adapters.items():
+        print(
+            f"{key}\t{ad.provider}:{ad.model}\tpaid={ad.paid}\tcost={ad.cost_per_call_cents}\t"
+            f"roles={','.join(roles_by_key.get(key, []))}\tfallback_to={engine.broker.allowed_fallbacks.get(key)}"
+        )
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_ai_test(args) -> int:
+    """CON-11 / D2 §4.2 : test de connexion explicite (GET /models, non facturé ; B6)."""
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    adapter = engine.broker.adapters.get(args.key)
+    if adapter is None:
+        print(f"fournisseur inconnu : {args.key}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    try:
+        result = await adapter.ping()
+    except Exception as exc:
+        engine.audit.log("op.ai.test", "failure", detail={"provider_key": args.key}, client=None)
+        print(f"test de connexion échoué : {exc}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    engine.audit.log("op.ai.test", "success", detail={"provider_key": args.key}, client=None)
+    print(json.dumps(result, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_ai_fallback(args) -> int:
+    """CON-11 / T8.8/T8.9 + V1.3 : autorise ou révoque le repli local -> cloud (persisté, audité).
+    Le flag --enable/--disable est EXPLICITE : aucune autorisation implicite (T8.9)."""
+    if args.enable is None:
+        print("préciser --enable ou --disable (aucune autorisation implicite du repli, T8.9)", file=sys.stderr)
+        return 2
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", bool(args.enable))
+    if args.enable and "local" in engine.broker.adapters and "mistral" in engine.broker.adapters:
+        engine.broker.allowed_fallbacks["local"] = "mistral"
+    else:
+        engine.broker.allowed_fallbacks.pop("local", None)
+    engine.audit.log("op.ai.fallback.toggle", "success", detail={"enabled": bool(args.enable)}, client=None)
+    print(json.dumps({"allow_ai_fallback_local_to_cloud": bool(args.enable), "fallbacks": dict(engine.broker.allowed_fallbacks)}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="osia", description="OSIA — moteur d'investigation OSINT")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -498,6 +561,17 @@ def main(argv: list[str] | None = None) -> int:
     ctoggle.add_argument("--disable", dest="enable", action="store_false")
     ctoggle.add_argument("--confirm", action="store_true", help="autorisation explicite requise pour un connecteur expérimental (T5.1)")
     ctoggle.set_defaults(func=_cmd_connector_toggle)
+
+    ai = sub.add_parser("ai", help="courtier IA : fournisseurs, modèles par rôle, repli (CON-11, T8/D2)")
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True)
+    ai_sub.add_parser("providers", help="lister les fournisseurs IA enregistrés (sans clés)").set_defaults(func=_cmd_ai_providers)
+    aitest = ai_sub.add_parser("test", help="tester la connexion d'un fournisseur (GET /models, non facturé)")
+    aitest.add_argument("key")
+    aitest.set_defaults(func=_cmd_ai_test)
+    aifb = ai_sub.add_parser("fallback", help="autoriser/révoquer le repli local -> cloud (T8.9, V1.3)")
+    aifb.add_argument("--enable", dest="enable", action="store_true", default=None)
+    aifb.add_argument("--disable", dest="enable", action="store_false", default=None)
+    aifb.set_defaults(func=_cmd_ai_fallback)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))

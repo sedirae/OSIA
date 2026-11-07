@@ -115,6 +115,14 @@ class Settings:
     paid_calls_enabled: bool = False
     global_monthly_cap_cents: int = 500
     timezone: str = "UTC"
+    # CON-11 / V1.3 : fournisseurs IA (simulé par défaut — aucun appel payant sans config explicite)
+    ai_provider: str = "simulated"
+    ai_local_base_url: str | None = None
+    ai_local_model: str = "ministral-3-8b"
+    ai_timeout_seconds: int = 60  # V1.4 : 60 s max par appel IA
+    mistral_api_base: str = "https://api.mistral.ai/v1"
+    mistral_model: str = "mistral-small-2603"
+    mistral_cost_cents: int = 5  # borne estimée par appel (T8.4 : réservation avant l'appel)
     paths: Paths = field(default_factory=Paths.from_env)
 
     @classmethod
@@ -155,6 +163,17 @@ class Settings:
         cap = os.environ.get("OSIA_GLOBAL_MONTHLY_CAP_CENTS")
         if cap:
             settings.global_monthly_cap_cents = int(cap)
+        settings.ai_provider = os.environ.get("OSIA_AI_PROVIDER", settings.ai_provider)
+        settings.ai_local_base_url = os.environ.get("OSIA_AI_LOCAL_BASE_URL") or None
+        settings.ai_local_model = os.environ.get("OSIA_AI_LOCAL_MODEL", settings.ai_local_model)
+        ait = os.environ.get("OSIA_AI_TIMEOUT_SECONDS")
+        if ait:
+            settings.ai_timeout_seconds = int(ait)
+        settings.mistral_api_base = os.environ.get("OSIA_MISTRAL_API_BASE", settings.mistral_api_base)
+        settings.mistral_model = os.environ.get("OSIA_MISTRAL_MODEL", settings.mistral_model)
+        mcost = os.environ.get("OSIA_MISTRAL_COST_CENTS")
+        if mcost:
+            settings.mistral_cost_cents = int(mcost)
         return settings
 
     @property
