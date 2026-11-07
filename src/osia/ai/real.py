@@ -140,7 +140,7 @@ class ChatCompletionsAdapter(AIAdapter):
             raise AIAdapterError(f"fournisseur {self.provider} : réponse illisible (pas de choices[0].message.content)", status=status) from exc
         try:
             parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, TypeError) as exc:  # TypeError : content null ou non str
             raise AIAdapterError(f"fournisseur {self.provider} : sortie non JSON (T8.6)", status=status) from exc
         # ValidationError propagée : le courtier rejette la sortie (T8.6, sortie_ia_invalide)
         return response_model.model_validate(parsed)
