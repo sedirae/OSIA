@@ -197,3 +197,14 @@ Les règles transversales OSIA-I-01…16 de [TECHNIQUE.md](../CADRAGE/TECHNIQUE.
 ## Évolutions ultérieures
 
 Toute évolution doit distinguer : correction éditoriale, choix de conception compatible, changement d’arbitrage produit. Consigner le motif, les décisions concernées, l’autorité et la date, les documents modifiés et les critères de recette affectés. Ne pas effacer la trace d’une décision remplacée ; retirer sa formulation devenue obsolète des instructions actives.
+
+## Suivi de clôture — vérification ciblée du 07/11/2026 (commit `7ec5ea3`, issue #17)
+
+La vérification de clôture confirme la clôture du suivi des PR (CI verte sur `main`, 257 tests) et corrige l’affirmation « seul Playwright reste à arbitrer ». Traitements actés :
+
+| Référence | Traitement | Où |
+| --- | --- | --- |
+| EXEC-03 (frontend facultatif) | **Livré** : choix d'activation réel — `web_ui_enabled` / `OSIA_WEB_UI_ENABLED` / `osia serve --no-web-ui` / `create_app(web_ui=False)` ; mode API seul testé (aucune route web, auth serveur conservée) | `src/osia/config.py`, `src/osia/api/app.py`, `src/osia/cli.py`, `tests/test_audit_cloture.py`, CONCEPTION/01 §1 |
+| EXEC-06 (notification de version) | **Livré** : check best-effort au démarrage du serveur via le NetworkGuard + `osia version --check` + `GET /api/v1/system/version` ; mises à jour toujours manuelles, aucune mise à jour automatique | `src/osia/version.py`, `src/osia/server.py`, `src/osia/api/app.py`, `src/osia/cli.py`, `tests/test_audit_cloture.py` |
+| V1.2 / B-ACC-04 / AC-T5-03 (Playwright) | **Décision ouverte soumise au porteur** : report en V2 à acter explicitement, puis à répercuter dans PERIMETRE-V1 et la matrice de recette (issue de suivi dédiée) | COWORKAI/RECETTE-APPLICATIVE.md §8 |
+| Qualification externe BODACC/GLEIF | Reste à réaliser hors CI (aucun appel réel effectué) | COWORKAI/RECETTE-APPLICATIVE.md §8 |

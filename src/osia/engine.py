@@ -30,6 +30,9 @@ class Engine:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.pool = None
+        # EXEC-06 : dernière version connue (renseignée par le check de démarrage,
+        # exposé via GET /api/v1/system/version) — None = non vérifié / indisponible.
+        self.latest_version: str | None = None
         self.repo: Repo
         self.bus: EventBus
         self.budgets: BudgetManager
@@ -51,6 +54,8 @@ class Engine:
         self.health: ConnectorHealthChecker
         self.external_semaphore: asyncio.Semaphore
         self._runner: asyncio.Task | None = None
+        # EXEC-06 : tâche de fond du check de version au démarrage (await dans stop()).
+        self._version_check_task: asyncio.Task | None = None
 
     async def setup(self) -> None:
         self.settings.paths.ensure()
@@ -149,6 +154,11 @@ class Engine:
         self.scheduler.stop()
         if self._runner:
             await self._runner
+        if self._version_check_task:
+            try:
+                await self._version_check_task
+            except Exception:
+                pass  # best-effort : le check de version ne doit jamais empêcher l'arrêt
         if self.pool:
             await self.pool.close()
         # Audit PR#24 P3-c : fermer les sessions HTTP poolées à l'arrêt (évite les
