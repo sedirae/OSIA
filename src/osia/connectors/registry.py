@@ -43,6 +43,7 @@ class ConnectorRegistry:
                 "id": c.manifest.id,
                 "version": c.manifest.version,
                 "trust_level": c.manifest.trust_level.value,
+                "primary_source": c.manifest.primary_source,
                 "capabilities": c.manifest.capabilities,
                 "domains": c.manifest.domains,
                 "paid": c.manifest.paid,

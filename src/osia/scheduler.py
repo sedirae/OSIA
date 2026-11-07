@@ -144,6 +144,8 @@ class Scheduler:
                 payload={"task_id": task["id"], "kind": task["kind"], "error": deny.reason},
             )
             await self.engine.orchestrator.on_policy_deny(task, deny)
+            # F08 : un refus peut laisser l'investigation sans aucun travail exécutable
+            await self.engine.orchestrator.on_task_failed(task, deny.reason)
             return
         except Exception as exc:
             await self.repo.set_task_state(task["id"], "failed", error=str(exc), finished=True)
@@ -153,6 +155,8 @@ class Scheduler:
                 branch_id=task["branch_id"],
                 payload={"task_id": task["id"], "kind": task["kind"], "error": str(exc)},
             )
+            # F08 : idem après un échec technique (état terminal explicite si plus rien à exécuter)
+            await self.engine.orchestrator.on_task_failed(task, str(exc))
             return
         await self.repo.set_task_state(task["id"], "succeeded", finished=True)
         await self.bus.emit(

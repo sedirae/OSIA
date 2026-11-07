@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import asyncpg
 
@@ -77,6 +78,15 @@ class GraphService:
         if self.registry is None:
             return {}
         return {c["id"]: c["trust_level"] for c in self.registry.list()}
+
+    def _primary_sources(self) -> dict[str, bool]:
+        """Provenance primaire (audit F07) : distincte de la confiance technique (trust_level).
+        Seuls les connecteurs dont le manifeste déclare primary_source=True (registres officiels)
+        établissent directement une réponse ; web.url / simulated.web, pourtant 'official',
+        ne sont PAS des sources primaires."""
+        if self.registry is None:
+            return {}
+        return {c["id"]: bool(c.get("primary_source")) for c in self.registry.list()}
 
     async def _entity_exists(self, conn, investigation_id: str, entity_id: str) -> bool:
         row = await conn.fetchrow(
@@ -745,10 +755,15 @@ class GraphService:
         return out
 
     async def objective_etaye(self, investigation_id: str, branch_id: Optional[str] = None) -> dict[str, Any]:
-        """Critere V1.4 evalue par le moteur (T4.6) : chaque reponse decisive repose sur une
-        source primaire (connecteur official) ou deux sources independantes concordantes,
-        et aucune contradiction majeure non resolue (T6.6)."""
+        """Critere V1.4 evalue par le moteur (T4.6, audit F07) : chaque reponse decisive doit
+        s'appuyer sur une PREUVE DIRECTE (proof_ids resolvant vers des preuves existantes) ;
+        une source primaire = connecteur dont le manifeste declare primary_source=True (jamais
+        un simple trust_level 'official' : web.url/simulated.web ne sont pas primaires), ou deux
+        publications INDEPENDANTES (domaines source distincts — deux connecteurs ne prouvent pas
+        l'independance). Les assertions rejetees (human_decision=rejected) ou non_etabli ne
+        comptent pas, et aucune contradiction majeure non resolue (T6.6)."""
         trusts = self._trust_levels()
+        primaries = self._primary_sources()
         assertions = await self.list_assertions(investigation_id, branch_id=branch_id)
         decisive = [a for a in assertions if a["decisive"]]
         decision_by_id = {a["id"]: a["human_decision"] for a in assertions}
@@ -766,16 +781,21 @@ class GraphService:
         reponses: list[dict[str, Any]] = []
         all_ok = bool(decisive)
         for a in decisive:
+            rejected = a["human_decision"] == HumanDecision.REJECTED.value
+            non_etabli = a["support_level"] == SupportLevel.NON_ETABLI.value
             proof_ids = _as_list(a["proof_ids"])
             proofs = await self.pool.fetch(
-                "SELECT connector_id FROM proof_refs WHERE investigation_id = $1 AND id = ANY($2::text[])",
+                "SELECT id, connector_id, source_url FROM proof_refs WHERE investigation_id = $1 AND id = ANY($2::text[])",
                 investigation_id, proof_ids or ["__none__"],
             )
+            found = {p["id"] for p in proofs}
+            # preuve directe : chaque preuve referencee existe (et au moins une est referencee)
+            direct = bool(proof_ids) and set(proof_ids) <= found
             connectors = sorted({p["connector_id"] for p in proofs if p["connector_id"]})
-            levels = [trusts.get(c, "experimental") for c in connectors]
-            primary = any(level == "official" for level in levels)
-            independent = len(connectors) >= 2
-            ok = primary or independent
+            domains = sorted({urlparse(p["source_url"]).hostname or "" for p in proofs if p["source_url"]} - {""})
+            primary = any(primaries.get(c, False) for c in connectors)
+            independent = len(domains) >= 2
+            ok = direct and not rejected and not non_etabli and (primary or independent)
             all_ok = all_ok and ok
             reponses.append({
                 "id": a["id"],
@@ -783,14 +803,25 @@ class GraphService:
                 "nature": a["nature"],
                 "base": "source_primaire" if primary else ("deux_sources_independantes" if independent else "insuffisant"),
                 "connecteurs": connectors,
+                "niveaux_confiance": {c: trusts.get(c, "inconnu") for c in connectors},
+                "domaines": domains,
+                "preuve_directe": direct,
+                "rejetee": rejected,
+                "non_etabli": non_etabli,
             })
         etaye = all_ok and not contradictions
         detail = []
         if not decisive:
             detail.append("aucune reponse decisive dans la branche")
         for r in reponses:
-            if r["base"] == "insuffisant":
-                detail.append(f"reponse decisive {r['id']} insuffisamment etayee (ni source primaire ni deux sources independantes)")
+            if r["rejetee"]:
+                detail.append(f"reponse decisive {r['id']} rejetee par decision humaine")
+            elif r["non_etabli"]:
+                detail.append(f"reponse decisive {r['id']} non etablie")
+            elif not r["preuve_directe"]:
+                detail.append(f"reponse decisive {r['id']} sans preuve directe (aucune preuve resolvable)")
+            elif r["base"] == "insuffisant":
+                detail.append(f"reponse decisive {r['id']} insuffisamment etayee (ni source primaire ni deux domaines independants)")
         for c in contradictions:
             detail.append(f"contradiction majeure non resolue: {c['id']}")
         return {

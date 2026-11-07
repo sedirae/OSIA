@@ -23,6 +23,9 @@ class StopReason(str, enum.Enum):
     USER = "user_interrupt"
     TECHNICAL = "technical_error"
     SECURITY = "security_block"
+    # F08 : état terminal explicite quand plus aucune tâche exécutable ne reste
+    # (plan vide, plus de suite, toutes les tâches en échec) — évite un 'running' infini.
+    EXHAUSTED = "work_exhausted"
 
 
 class TaskState(str, enum.Enum):

@@ -101,6 +101,11 @@ class Orchestrator:
         inv = await self.repo.get_investigation(investigation_id)
         if inv is None:
             raise PolicyDeny("investigation_inconnue", "branche")
+        # F08 : une branche explicite sur une investigation arrêtée la RÉACTIVE (c'est la
+        # nouvelle autorisation : explicit_acceptance requis, plafonds <= parent). Sur une
+        # investigation suspendue, la reprise explicite (resume) reste requise.
+        if inv["state"] not in ("running", "stopped"):
+            raise PolicyDeny(f"reprise_requise:{inv['state']}", "branche")
         inv_limits = limits_from_record(inv)
         profile = await self.repo.get_profile(inv["profile_id"])
         if profile is None:
@@ -130,6 +135,25 @@ class Orchestrator:
                 raise PolicyDeny("profondeur_max_atteinte", "branche")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # P2-1 (audit PR #21) : l'état est relu SOUS VERROU dans la transaction —
+                # un stop/resume concurrent entre le read initial et la transaction ne peut
+                # plus produire une branche créée sans réactivation (qui ne s'exécuterait jamais).
+                inv_locked = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if inv_locked is None:
+                    raise PolicyDeny("investigation_inconnue", "branche")
+                if inv_locked["state"] not in ("running", "stopped"):
+                    raise PolicyDeny(f"reprise_requise:{inv_locked['state']}", "branche")
+                reactivated = inv_locked["state"] == "stopped"
+                if reactivated:
+                    # F08 : la branche explicite autonome réactive l'investigation arrêtée
+                    # (les anciennes branches restent arrêtées ; seules les tâches de la
+                    # nouvelle branche seront exécutées).
+                    await conn.execute(
+                        "UPDATE investigations SET state = 'running', stop_reason = NULL, updated_at = now() WHERE id = $1",
+                        investigation_id,
+                    )
                 branch = _norm_row(
                     await conn.fetchrow(
                         "INSERT INTO branches (id, investigation_id, parent_branch_id, objective, effective_limits, state, depth, idempotency_key) "
@@ -151,6 +175,12 @@ class Orchestrator:
                     branch["id"],
                     json.dumps({"objective": req.objective}, ensure_ascii=False),
                 )
+        if reactivated:
+            await self.bus.emit(
+                type="investigation.reactivated",
+                investigation_id=investigation_id,
+                payload={"reason": "branche_explicite", "branch_id": branch["id"]},
+            )
         await self.bus.emit(
             type="branch.created",
             investigation_id=investigation_id,
@@ -159,43 +189,49 @@ class Orchestrator:
         )
         return branch
 
+    async def _stop_in_conn(self, conn, investigation_id: str, reason: StopReason) -> tuple[bool, asyncpg.Record]:
+        """Corps de stop() exécuté DANS une transaction appelante (verrou investigation pris par
+        l'appelant si besoin) : transition + branches + tâches + opérations externes (F04)."""
+        inv = _norm_row(
+            await conn.fetchrow(
+                "UPDATE investigations SET state = 'stopped', stop_reason = $2, updated_at = now() "
+                "WHERE id = $1 AND state IN ('running','suspended') RETURNING *",
+                investigation_id,
+                reason.value,
+            )
+        )
+        matched = inv is not None
+        if inv is None:
+            inv = await conn.fetchrow("SELECT * FROM investigations WHERE id = $1", investigation_id)
+        await conn.execute(
+            "UPDATE branches SET state = 'stopped', stop_reason = $2, updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('running','suspended')",
+            investigation_id,
+            reason.value,
+        )
+        await conn.execute(
+            "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
+            investigation_id,
+        )
+        # F04 : distinguer jamais-envoyé (authorized/reserved -> cancelled + enveloppe
+        # libérée) et envoyé (in_flight -> uncertain, à réconcilier, jamais relancé).
+        await conn.execute(
+            "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
+            investigation_id,
+        )
+        await conn.execute(
+            "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+            "WHERE investigation_id = $1 AND state = 'in_flight'",
+            investigation_id,
+        )
+        return matched, inv
+
     async def stop(self, investigation_id: str, reason: StopReason) -> asyncpg.Record:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                inv = _norm_row(
-                    await conn.fetchrow(
-                        "UPDATE investigations SET state = 'stopped', stop_reason = $2, updated_at = now() "
-                        "WHERE id = $1 AND state IN ('running','suspended') RETURNING *",
-                        investigation_id,
-                        reason.value,
-                    )
-                )
-                matched = inv is not None
-                if inv is None:
-                    inv = await self.repo.get_investigation(investigation_id)
-                await conn.execute(
-                    "UPDATE branches SET state = 'stopped', stop_reason = $2, updated_at = now() "
-                    "WHERE investigation_id = $1 AND state IN ('running','suspended')",
-                    investigation_id,
-                    reason.value,
-                )
-                await conn.execute(
-                    "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
-                    "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
-                    investigation_id,
-                )
-                # F04 : distinguer jamais-envoyé (authorized/reserved -> cancelled + enveloppe
-                # libérée) et envoyé (in_flight -> uncertain, à réconcilier, jamais relancé).
-                await conn.execute(
-                    "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
-                    "WHERE investigation_id = $1 AND state IN ('authorized','reserved')",
-                    investigation_id,
-                )
-                await conn.execute(
-                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
-                    "WHERE investigation_id = $1 AND state = 'in_flight'",
-                    investigation_id,
-                )
+                matched, inv = await self._stop_in_conn(conn, investigation_id, reason)
         if self.budgets is not None:
             await self.budgets.release_ops_reservations(investigation_id, note=f"arrêt ({reason.value}) : opérations jamais envoyées")
         if matched:
@@ -208,9 +244,16 @@ class Orchestrator:
 
     async def suspend(self, investigation_id: str) -> asyncpg.Record:
         inv = await self.repo.set_investigation_state(investigation_id, InvestigationState.SUSPENDED.value)
+        # F08 : une pause n'est PAS une annulation définitive — les tâches en file/en cours
+        # passent 'interrupted' (re-mises en file par resume()), distinct de 'cancelled' (stop).
         await self.pool.execute(
-            "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
-            "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
+            "UPDATE tasks SET state = 'interrupted', updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
+            investigation_id,
+        )
+        await self.pool.execute(
+            "UPDATE branches SET state = 'suspended', updated_at = now() "
+            "WHERE investigation_id = $1 AND state = 'running'",
             investigation_id,
         )
         # F04 : idem stop — jamais-envoyé libéré, envoyé passé en uncertain
@@ -277,5 +320,51 @@ class Orchestrator:
         elif reason in ("plafond_requetes_source_atteint", "plafond_appels_ia_atteint"):
             await self.stop(task["investigation_id"], StopReason.SOURCES)
 
+    async def _maybe_terminate_if_exhausted(self, investigation_id: str, note: str = "") -> None:
+        """F08 : état terminal explicite — si l'investigation est encore 'running' sans aucune
+        tâche exécutable (queued/claimed/running), elle est arrêtée (work_exhausted) au lieu de
+        rester 'running' indéfiniment (plan vide, plus de suite, tâches en échec).
+        P3-1 (audit PR #21) : comptage ET arrêt dans la MÊME transaction sous verrou de
+        l'investigation — une branche créée concurremment ne peut pas voir sa tâche annulée."""
+        matched = False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if inv is None or inv["state"] != "running":
+                    return
+                pending = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
+                    investigation_id,
+                )
+                if pending:
+                    return
+                matched, _inv = await self._stop_in_conn(conn, investigation_id, StopReason.EXHAUSTED)
+        if self.budgets is not None:
+            await self.budgets.release_ops_reservations(
+                investigation_id, note=f"épuisement ({StopReason.EXHAUSTED.value}) : opérations jamais envoyées"
+            )
+        if matched:
+            await self.bus.emit(
+                type="investigation.stopped",
+                investigation_id=investigation_id,
+                payload={"reason": StopReason.EXHAUSTED.value},
+            )
+            await self.bus.emit(
+                type="investigation.exhausted",
+                investigation_id=investigation_id,
+                payload={"note": note},
+            )
+
     async def on_task_succeeded(self, task: asyncpg.Record, result: dict[str, Any]) -> None:
-        return None
+        await self._maybe_terminate_if_exhausted(
+            task["investigation_id"], note=f"tâche {task['id']} réussie, aucun travail exécutable restant"
+        )
+
+    async def on_task_failed(self, task: asyncpg.Record, error: str) -> None:
+        """F08 : idem après un échec — un plan vide ou une chaîne rompue termine l'investigation
+        explicitement au lieu de laisser 'running' sans tâche exécutable."""
+        await self._maybe_terminate_if_exhausted(
+            task["investigation_id"], note=f"tâche {task['id']} en échec ({error}), aucun travail exécutable restant"
+        )

@@ -99,8 +99,12 @@ async def test_reject_match_degrades_dependent_relations_without_deleting(engine
 async def test_contradiction_blocks_objective_until_human_resolution(engine):
     inv = await make_investigation(engine)
     branch = await first_branch(engine, inv["id"])
+    # F07 : seule une source primaire (manifeste primary_source=True) fonde "source_primaire"
+    registre = SimulatedConnector("simulated.registre")
+    registre.manifest.primary_source = True
+    engine.registry.register(registre)
     proof = await engine.filestore.store_proof(
-        investigation_id=inv["id"], content=b"{}", source_url="https://example.test/1", connector_id="simulated.web"
+        investigation_id=inv["id"], content=b"{}", source_url="https://registre.test/1", connector_id="simulated.registre"
     )
     a = await engine.graph.add_assertion(
         inv["id"], branch_id=branch["id"], statement="ACME est active",
@@ -212,7 +216,10 @@ async def test_api_graph_endpoints(engine):
         inv["id"], branch_id=branch["id"], src_id=a["entity_id"], dst_id=b["entity_id"], type="similaire",
         support_level=SupportLevel.A_CONFIRMER, derivation="ia",
     )
-    proof = await engine.filestore.store_proof(investigation_id=inv["id"], content=b"{}", source_url="https://example.test/1", connector_id="simulated.web")
+    registre = SimulatedConnector("simulated.registre")
+    registre.manifest.primary_source = True
+    engine.registry.register(registre)
+    proof = await engine.filestore.store_proof(investigation_id=inv["id"], content=b"{}", source_url="https://registre.test/1", connector_id="simulated.registre")
     await engine.graph.add_assertion(
         inv["id"], branch_id=branch["id"], statement="ACME existe", nature=ClaimNature.FAIT_ETABLI,
         support_level=SupportLevel.DOCUMENTE, proof_ids=[proof["proof_ref_id"]], decisive=True, derivation="source",

@@ -270,7 +270,9 @@ class Repo:
                 return _norm_row(await conn.fetchrow(
                     "UPDATE tasks SET state = 'claimed', started_at = now(), updated_at = now(), attempts = attempts + 1 "
                     "WHERE id = (SELECT t.id FROM tasks t JOIN investigations i ON i.id = t.investigation_id "
+                    "LEFT JOIN branches b ON b.id = t.branch_id "
                     "WHERE t.state = 'queued' AND t.not_before <= now() AND i.state = 'running' "
+                    "AND (b.id IS NULL OR b.state = 'running') "
                     "ORDER BY t.priority DESC, t.created_at LIMIT 1 FOR UPDATE OF t SKIP LOCKED) "
                     "RETURNING *"
                 ))

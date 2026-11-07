@@ -83,6 +83,9 @@ async def handle_plan(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
     engine = ctx.engine
     inv = await engine.repo.get_investigation(task["investigation_id"])
     limits = limits_from_record(inv)
+    # F08 : le plan décompose l'objectif de la BRANCHE (pas celui de l'investigation parente)
+    branch = await engine.repo.get_branch(task["branch_id"]) if task["branch_id"] else None
+    objective = (branch["objective"] if branch and branch["objective"] else None) or inv["objective"]
     plan = await engine.broker.call(
         "planning",
         prompt=(
@@ -90,9 +93,10 @@ async def handle_plan(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
             "choisir un connector_id parmi available_connectors selon ses capabilities et son scope"
         ),
         input_data={
-            "objective": inv["objective"],
+            "objective": objective,
             "hints": inv["hints"],
             "title": inv["title"],
+            "branch_id": task["branch_id"],
             "available_connectors": engine.registry.list(),
         },
         response_model=PlanProposal,
@@ -489,8 +493,17 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
                 priority=5,
             )
         return {"conclusion": synthesis.conclusion, "rebond": task["depth"] + 1}
+    # F08 : les pistes proposées mais non lancées (limite de profondeur) sont restituées
+    # explicitement — TOUTES, pas seulement celles sous le plafond (P3-4 audit PR #21).
+    followups_non_lancees = list(synthesis.suggested_followups)
+    await engine.bus.emit(
+        type="synthesis.followups_non_lances",
+        investigation_id=inv["id"],
+        branch_id=task["branch_id"],
+        payload={"followups": followups_non_lancees, "reason": "depth_limit"},
+    )
     await engine.orchestrator.stop(inv["id"], StopReason.DEPTH_LIMIT)
-    return {"conclusion": synthesis.conclusion, "stop": "depth_limit"}
+    return {"conclusion": synthesis.conclusion, "stop": "depth_limit", "followups_non_lancees": followups_non_lancees}
 
 
 DEFAULT_HANDLERS: dict[str, TaskHandler] = {
