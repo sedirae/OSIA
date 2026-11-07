@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from .base import Connector
+from .base import Connector, TrustLevel
 
 
 class ConnectorRegistry:
     """Registre des connecteurs : activation/désactivation individuelle (FONCTIONNEL §6).
 
     Niveau de confiance dans le manifeste (T5.1) ; seuls les connecteurs activés sont autorisés
-    par le PolicyEngine.
-    """
+    par le PolicyEngine. Les connecteurs EXPERIMENTAL sont désactivés par défaut et exigent une
+    autorisation explicite (T5.1)."""
 
     def __init__(self):
         self._connectors: dict[str, Connector] = {}
         self._enabled: set[str] = set()
 
-    def register(self, connector: Connector, *, enabled: bool = True) -> None:
+    def register(self, connector: Connector, *, enabled: bool | None = None) -> None:
         self._connectors[connector.manifest.id] = connector
+        if enabled is None:
+            enabled = connector.manifest.trust_level != TrustLevel.EXPERIMENTAL
         if enabled:
             self._enabled.add(connector.manifest.id)
 

@@ -101,6 +101,19 @@ class LoginRequest(BaseModel):
     token: str
 
 
+class SecretSetRequest(BaseModel):
+    """CON-06 / T5.5 : la valeur n'est jamais journalisée ni exportée."""
+
+    value: str
+
+
+class ConnectorToggleRequest(BaseModel):
+    """CON-06 / T5.1 : `confirm` est exigé pour activer un connecteur EXPERIMENTAL."""
+
+    enabled: bool
+    confirm: bool = False
+
+
 class Event(BaseModel):
     id: int
     investigation_id: Optional[str]

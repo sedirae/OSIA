@@ -41,7 +41,14 @@ class FileStore:
         connector_id: str | None = None,
     ) -> dict:
         """Protocole en 4 phases : (1) .part fsync, (2) déplacement atomique + SHA-256,
-        (3) transaction SQL proof_files + proof_refs, (4) commit."""
+        (3) transaction SQL proof_files + proof_refs, (4) commit.
+
+        T5.6 : la provenance est une donnée, pas un ordre — l'URL source est validée
+        (schéma http/https uniquement) avant stockage."""
+        if source_url is not None:
+            scheme = source_url.split(":", 1)[0].lower()
+            if scheme not in ("http", "https"):
+                raise ValueError(f"schéma de provenance non autorisé: {scheme!r}")
         sha256 = hashlib.sha256(content).hexdigest()
         incoming = self.paths.incoming_dir / f"{sha256}.part"
         final = self._content_path(sha256)

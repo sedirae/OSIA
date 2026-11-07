@@ -108,6 +108,10 @@ class Settings:
     tls_autogen: bool = False
     session_ttl_hours: int = 8
     audit_retention_days: int = 90
+    net_allow_domains: list[str] = field(default_factory=list)
+    net_deny_domains: list[str] = field(default_factory=list)
+    net_max_bytes: int = 10 * 1024 * 1024
+    secrets_persist: bool = True
     paid_calls_enabled: bool = False
     global_monthly_cap_cents: int = 500
     timezone: str = "UTC"
@@ -134,6 +138,17 @@ class Settings:
         retention = os.environ.get("OSIA_AUDIT_RETENTION_DAYS")
         if retention:
             settings.audit_retention_days = int(retention)
+        allow = os.environ.get("OSIA_NET_ALLOW_DOMAINS", "")
+        if allow:
+            settings.net_allow_domains = [d.strip().lower() for d in allow.split(",") if d.strip()]
+        deny = os.environ.get("OSIA_NET_DENY_DOMAINS", "")
+        if deny:
+            settings.net_deny_domains = [d.strip().lower() for d in deny.split(",") if d.strip()]
+        maxb = os.environ.get("OSIA_NET_MAX_BYTES")
+        if maxb:
+            settings.net_max_bytes = int(maxb)
+        persist = os.environ.get("OSIA_SECRETS_PERSIST", "1").strip().lower()
+        settings.secrets_persist = persist in ("1", "true", "yes", "on")
         paid = os.environ.get("OSIA_PAID_CALLS_ENABLED", "").strip().lower()
         if paid:
             settings.paid_calls_enabled = paid in ("1", "true", "yes", "on")

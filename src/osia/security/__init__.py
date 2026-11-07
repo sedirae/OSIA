@@ -1,13 +1,25 @@
 from __future__ import annotations
 
-import secrets
+import secrets as _stdlib_secrets
 
 from ..config import secure_write
 from .audit import SecurityAudit
+from .isolation import IsolationLimits, run_isolated, run_isolated_sync
+from .secrets import SecretStore
 from .sessions import SessionManager, hash_token
 from .tls import ensure_self_signed_cert
 
-__all__ = ["SecurityAudit", "SessionManager", "hash_token", "ensure_self_signed_cert", "ensure_server_credentials"]
+__all__ = [
+    "SecurityAudit",
+    "SessionManager",
+    "SecretStore",
+    "IsolationLimits",
+    "run_isolated",
+    "run_isolated_sync",
+    "hash_token",
+    "ensure_self_signed_cert",
+    "ensure_server_credentials",
+]
 
 
 async def ensure_server_credentials(engine) -> str | None:
@@ -23,7 +35,7 @@ async def ensure_server_credentials(engine) -> str | None:
         existing = None
     if existing:
         return None
-    token = secrets.token_urlsafe(32)
+    token = _stdlib_secrets.token_urlsafe(32)
     await engine.repo.set_setting("auth_token_hash", hash_token(token))
     secure_write(settings.paths.config_dir / "auth_token", token + "\n")
     engine.audit.log("auth.token.issued", "success", detail={"mode": "server"})

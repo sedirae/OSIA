@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import asyncpg
 
 from .ai.schemas import Extraction, PlanProposal, Synthesis
-from .connectors.base import FetchRequest
+from .connectors.base import FetchRequest, TrustLevel
 from .models import ClaimNature, OpKind, PolicyDeny, StopReason, SupportLevel
 from .policies.limits import limits_from_record
 
@@ -63,6 +63,11 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     connector = engine.registry.get(payload["connector_id"])
     if connector is None:
         raise PolicyDeny("connecteur_non_autorise", "source")
+    # T5.1 : un connecteur EXPERIMENTAL exige une autorisation explicite persistée
+    if connector.manifest.trust_level == TrustLevel.EXPERIMENTAL:
+        allowed = await engine.repo.get_setting(f"allow_experimental:{connector.manifest.id}", False)
+        if not allowed:
+            raise PolicyDeny("experimental_sans_autorisation_explicite", "source")
     decision = await engine.policy.authorize(
         investigation_id=inv["id"],
         kind=OpKind.SOURCE_REQUEST,
