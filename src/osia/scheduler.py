@@ -116,6 +116,13 @@ class Scheduler:
     def stop(self) -> None:
         self._stopping.set()
 
+    def reset_stop(self) -> None:
+        """Réarme l'événement d'arrêt pour un nouveau cycle `run_forever` dans le même process.
+        `stop()` est définitif : les jeux de recette rejouables (T3.14) qui redémarrent le
+        moteur après un arrêt doivent réarmer explicitement l'ordonnanceur, sinon le nouveau
+        runner quitte immédiatement et les tâches ne sont plus exécutées."""
+        self._stopping.clear()
+
     async def _execute(self, task: asyncpg.Record) -> None:
         await self.repo.set_task_state(task["id"], "running")
         handler = self.handlers.get(task["kind"])

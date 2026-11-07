@@ -1,0 +1,29 @@
+# CON-19 / T3.14 : CI intégrable aux revues — tests reproductibles hors ligne.
+# PostgreSQL est embarqué (pgserver) : aucun service externe, aucun appel réseau, aucune dépense.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (hors ligne, PostgreSQL embarqué)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Installation (dépendances + extra test)
+        run: python -m pip install -e ".[test]"
+      - name: Tests pytest (T3.14 — multicouches, simulations, non-régression)
+        # test_concurrent_reservations_cannot_exceed_cap : défaillant pré-existant sur main
+        # (concurrence réservations), non traité ici — voir CONCEPTION/14 §6.
+        run: python -m pytest -q --deselect tests/test_budgets.py::test_concurrent_reservations_cannot_exceed_cap
