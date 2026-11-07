@@ -508,6 +508,72 @@ async def _cmd_ai_fallback(args) -> int:
     return 0
 
 
+async def _cmd_recette_run(args) -> int:
+    """CON-19 / T3.14 : rejoue les jeux de recette HORS LIGNE (connecteur + IA simulés, aucune
+    dépense) et écrit les relevés de résultats réels en JSON."""
+    import datetime as _dt
+
+    from .engine import Engine
+    from .recette import SCENARIOS, run_all, run_scenario
+
+    settings = _settings()
+    engine = Engine(settings)
+    await engine.setup()
+    out_dir = pathlib.Path(args.out) if args.out else settings.paths.data_dir / "releves"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.scenario == "all":
+        results = await run_all(engine)
+    else:
+        if args.scenario not in SCENARIOS:
+            print(f"scénario inconnu : {args.scenario} (disponibles: all, {', '.join(sorted(SCENARIOS))})", file=sys.stderr)
+            await engine.pool.close()
+            return 1
+        results = {args.scenario: await run_scenario(engine, args.scenario)}
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for name, releve in results.items():
+        path = out_dir / f"recette-{name}-{ts}.json"
+        path.write_text(json.dumps(releve, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        print(json.dumps({"scenario": name, "final_state": releve["final_state"], "stop_reason": releve["stop_reason"], "releve": str(path)}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_ai_eval(args) -> int:
+    """CON-19 / T8.10 : évalue un adaptateur IA PAR TÂCHE sur le jeu de cas embarqué
+    (reproductible ; hors ligne par défaut avec l'adaptateur simulé) et écrit le relevé
+    de métriques (conformité schéma, erreurs, latence, coût, F1 d'extraction)."""
+    import datetime as _dt
+
+    from .ai.eval import EVAL_CASES, evaluate_adapter, scripted_adapter_for_cases
+
+    settings = _settings()
+    if args.adapter == "simulated":
+        adapter = scripted_adapter_for_cases(EVAL_CASES, key="simulated")
+    else:
+        from .ai.real import build_ai_adapters
+        from .security import SecretStore
+
+        adapters, _, _ = build_ai_adapters(settings, SecretStore(settings.paths.config_dir, persist=settings.secrets_persist))
+        adapter = adapters.get(args.adapter)
+        if adapter is None:
+            print(f"adaptateur non configuré : {args.adapter} (simulé toujours disponible ; les autres exigent leur configuration)", file=sys.stderr)
+            return 1
+    report = await evaluate_adapter(args.adapter, adapter)
+    out = pathlib.Path(args.out) if args.out else settings.paths.data_dir / "releves" / f"eval-{args.adapter}-{_dt.datetime.now(_dt.timezone.utc):%Y%m%dT%H%M%SZ}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = {
+        "adapter": args.adapter,
+        "provider": report["provider"],
+        "model": report["model"],
+        "totals": report["totals"],
+        "by_role": {role: {k: v for k, v in agg.items() if k in ("cases", "schema_conformance_rate", "errors", "mean_latency_ms", "cost_cents_total", "extraction_f1")} for role, agg in report["by_role"].items()},
+        "releve": str(out),
+    }
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
 async def _cmd_settings_list(args) -> int:
     """CON-13 / D7 §9.1 : paramètres globaux effectifs (clés modifiables, sans secrets)."""
     from .engine import Engine
@@ -734,6 +800,17 @@ def main(argv: list[str] | None = None) -> int:
     aifb.add_argument("--enable", dest="enable", action="store_true", default=None)
     aifb.add_argument("--disable", dest="enable", action="store_false", default=None)
     aifb.set_defaults(func=_cmd_ai_fallback)
+    aieval = ai_sub.add_parser("eval", help="évaluer un adaptateur IA par tâche sur le jeu de cas embarqué (CON-19, T8.10) — hors ligne avec 'simulated'")
+    aieval.add_argument("--adapter", default="simulated", help="clé d'adaptateur (défaut: simulated, hors ligne)")
+    aieval.add_argument("--out", help="fichier relevé JSON (défaut: <data_dir>/releves/eval-*.json)")
+    aieval.set_defaults(func=_cmd_ai_eval)
+
+    rec = sub.add_parser("recette", help="jeux de recette rejouables hors ligne avec relevés de résultats (CON-19, T3.14)")
+    rec_sub = rec.add_subparsers(dest="recette_command", required=True)
+    rrun = rec_sub.add_parser("run", help="rejouer un scénario (ou tous) et écrire les relevés JSON")
+    rrun.add_argument("--scenario", default="all", help="nom du scénario ou 'all' (défaut)")
+    rrun.add_argument("--out", help="répertoire des relevés (défaut: <data_dir>/releves)")
+    rrun.set_defaults(func=_cmd_recette_run)
 
     st = sub.add_parser("settings", help="paramètres globaux hiérarchisés (CON-13, D7 §9.1-9.3) — sans secrets")
     st_sub = st.add_subparsers(dest="settings_command", required=True)
