@@ -455,6 +455,96 @@ async def _cmd_ai_fallback(args) -> int:
     return 0
 
 
+async def _cmd_settings_list(args) -> int:
+    """CON-13 / D7 §9.1 : paramètres globaux effectifs (clés modifiables, sans secrets)."""
+    from .engine import Engine
+    from .models import EDITABLE_SETTINGS
+
+    engine = Engine(_settings())
+    await engine.setup()
+    for key in EDITABLE_SETTINGS:
+        print(f"{key}\t{await engine.repo.get_setting(key)}")
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_settings_set(args) -> int:
+    """CON-13 / D7 §9.3 : modification validée (avant enregistrement) et auditée d'un paramètre
+    global. S'applique aux futures opérations ; pas de rétroactivité (D7 §9.2)."""
+    from .engine import Engine
+    from .models import validate_setting_value
+
+    raw = args.value
+    if raw.lower() in ("true", "false"):
+        value: object = raw.lower() == "true"
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = raw
+    try:
+        value = validate_setting_value(args.key, value)
+    except ValueError as exc:
+        print(f"valeur invalide : {exc}", file=sys.stderr)
+        return 1
+    engine = Engine(_settings())
+    await engine.setup()
+    await engine.repo.set_setting(args.key, value)
+    if args.key == "audit_retention_days":
+        engine.audit.retention_days = int(value)
+    if args.key == "session_ttl_hours":
+        from datetime import timedelta
+
+        engine.sessions.ttl = timedelta(hours=int(value))
+    engine.audit.log("op.settings.update", "success", detail={"keys": [args.key]}, client=None)
+    print(json.dumps({"updated": {args.key: value}}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_profiles_list(args) -> int:
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    for p in await engine.repo.list_profiles():
+        print(f"{p['id']}\t{p['name']}\trebonds={p['max_rebonds']}\tsources={p['max_source_requests']}\tai={p['max_ai_calls']}\tduree={p['max_duration_seconds']}s\tcost={p['max_cost_cents']}c\tdefault={p['is_default']}")
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_profiles_create(args) -> int:
+    """CON-13 / D3 §5.3 : profil personnalisé, bornes validées (LimitSet + CHECK SQL)."""
+    from .engine import Engine
+    from .models import LimitSet
+    from pydantic import ValidationError
+
+    limits = {
+        "max_rebonds": args.max_rebonds,
+        "max_source_requests": args.max_source_requests,
+        "max_ai_calls": args.max_ai_calls,
+        "max_duration_seconds": args.max_duration_seconds,
+        "max_cost_cents": args.max_cost_cents,
+    }
+    try:
+        LimitSet(**limits)
+    except ValidationError as exc:
+        print(f"limites invalides : {exc.errors()}", file=sys.stderr)
+        return 1
+    engine = Engine(_settings())
+    await engine.setup()
+    try:
+        row = await engine.repo.create_profile(profile_id=args.id, name=args.name, limits=limits, is_default=args.default)
+    except Exception as exc:
+        print(f"création refusée : {exc}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    engine.audit.log("op.profile.create", "success", detail={"profile_id": args.id, "is_default": args.default}, client=None)
+    print(json.dumps({"id": row["id"], "name": row["name"], "is_default": row["is_default"]}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="osia", description="OSIA — moteur d'investigation OSINT")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -572,6 +662,28 @@ def main(argv: list[str] | None = None) -> int:
     aifb.add_argument("--enable", dest="enable", action="store_true", default=None)
     aifb.add_argument("--disable", dest="enable", action="store_false", default=None)
     aifb.set_defaults(func=_cmd_ai_fallback)
+
+    st = sub.add_parser("settings", help="paramètres globaux hiérarchisés (CON-13, D7 §9.1-9.3) — sans secrets")
+    st_sub = st.add_subparsers(dest="settings_command", required=True)
+    st_sub.add_parser("list", help="afficher les paramètres globaux effectifs").set_defaults(func=_cmd_settings_list)
+    sset2 = st_sub.add_parser("set", help="modifier un paramètre (validé avant enregistrement, D7 §9.3)")
+    sset2.add_argument("key")
+    sset2.add_argument("value")
+    sset2.set_defaults(func=_cmd_settings_set)
+
+    prof = sub.add_parser("profiles", help="profils de recherche (CON-13, D3 §5.3, V1.4)")
+    prof_sub = prof.add_subparsers(dest="profiles_command", required=True)
+    prof_sub.add_parser("list", help="lister les profils").set_defaults(func=_cmd_profiles_list)
+    pcreate = prof_sub.add_parser("create", help="créer un profil personnalisé (bornes validées)")
+    pcreate.add_argument("--id", required=True)
+    pcreate.add_argument("--name", required=True)
+    pcreate.add_argument("--max-rebonds", type=int, required=True)
+    pcreate.add_argument("--max-source-requests", type=int, required=True)
+    pcreate.add_argument("--max-ai-calls", type=int, required=True)
+    pcreate.add_argument("--max-duration-seconds", type=int, required=True)
+    pcreate.add_argument("--max-cost-cents", type=int, required=True)
+    pcreate.add_argument("--default", action="store_true")
+    pcreate.set_defaults(func=_cmd_profiles_create)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))

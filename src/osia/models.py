@@ -151,6 +151,65 @@ class BudgetView(BaseModel):
     consumed_cents: int
     available_cents: int
     caps: dict[str, int]
+    warnings: list[str] = Field(default_factory=list)  # D3 §5.4 : avertissements à l'approche d'un plafond
+
+
+# CON-13 / D7 §9.1-9.3 : paramètres globaux modifiables (jamais de secret ici), avec bornes de
+# validité vérifiées avant enregistrement (D7 §9.3). V1.4 : budget 0 € au premier démarrage
+# (paid_calls_enabled=false), plafond global présaisi 5 €/mois, TTL cache 24 h.
+EDITABLE_SETTINGS: dict[str, type] = {
+    "paid_calls_enabled": bool,
+    "global_monthly_cap_cents": int,
+    "timezone": str,
+    "source_cache_ttl_hours": int,
+    "audit_retention_days": int,
+    "session_ttl_hours": int,
+}
+
+SETTING_BOUNDS: dict[str, tuple[int, Optional[int]]] = {
+    "global_monthly_cap_cents": (0, None),
+    "source_cache_ttl_hours": (1, None),
+    "audit_retention_days": (1, None),
+    "session_ttl_hours": (1, None),
+}
+
+
+def validate_setting_value(key: str, value: Any) -> Any:
+    """D7 §9.3 : vérification de validité avant enregistrement. Lève ValueError sinon."""
+    if key not in EDITABLE_SETTINGS:
+        raise ValueError(f"paramètre non modifiable ou inconnu : {key}")
+    expected = EDITABLE_SETTINGS[key]
+    if expected is bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} attend un booléen")
+        return value
+    if expected is int:
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{key} attend un entier")
+        lo, hi = SETTING_BOUNDS.get(key, (None, None))
+        if lo is not None and value < lo:
+            raise ValueError(f"{key} >= {lo} exigé")
+        if hi is not None and value > hi:
+            raise ValueError(f"{key} <= {hi} exigé")
+        return value
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} attend une chaîne non vide")
+    return value
+
+
+class SettingsUpdateRequest(BaseModel):
+    """CON-13 / D7 §9.3 : modification des paramètres globaux (clés de EDITABLE_SETTINGS)."""
+
+    settings: dict[str, Any]
+
+
+class ProfileCreateRequest(BaseModel):
+    """CON-13 / D3 §5.3 : profil personnalisé. Bornes validées (LimitSet + CHECK SQL)."""
+
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9_-]+$")
+    name: str = Field(min_length=1)
+    limits: dict[str, Any]
+    is_default: bool = False
 
 
 class ApiError(Exception):

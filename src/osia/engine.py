@@ -59,6 +59,8 @@ class Engine:
             "global_monthly_cap_cents", await self.repo.get_setting("global_monthly_cap_cents", self.settings.global_monthly_cap_cents)
         )
         await self.repo.set_setting("timezone", await self.repo.get_setting("timezone", self.settings.timezone))
+        # CON-13 / V1.4 : TTL du cache technique des requêtes source (24 h par défaut)
+        await self.repo.set_setting("source_cache_ttl_hours", await self.repo.get_setting("source_cache_ttl_hours", 24))
         self.bus = EventBus(self.repo)
         self.budgets = BudgetManager(self.pool)
         self.registry = ConnectorRegistry()

@@ -5,10 +5,11 @@ import hashlib
 import hmac
 import json
 import pathlib
-from typing import Optional
+from typing import Any, Optional
 
 import asyncpg
 from fastapi import FastAPI, Header, Request
+from pydantic import ValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from ..backup import BackupError
@@ -31,9 +32,14 @@ from ..models import (
     ImportPreviewRequest,
     LoginRequest,
     MatchProposalRequest,
+    ProfileCreateRequest,
     SecretSetRequest,
+    SettingsUpdateRequest,
+    LimitSet,
     PolicyDeny,
     StopRequest,
+    EDITABLE_SETTINGS,
+    validate_setting_value,
 )
 
 
@@ -144,19 +150,57 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/v1/profiles")
     async def profiles(request: Request) -> list[dict]:
         await require_auth(request)
-        return [
-            {
-                "id": p["id"],
-                "name": p["name"],
-                "max_rebonds": p["max_rebonds"],
-                "max_source_requests": p["max_source_requests"],
-                "max_ai_calls": p["max_ai_calls"],
-                "max_duration_seconds": p["max_duration_seconds"],
-                "max_cost_cents": p["max_cost_cents"],
-                "is_default": p["is_default"],
-            }
-            for p in await engine.repo.list_profiles()
-        ]
+        return [_profile_json(p) for p in await engine.repo.list_profiles()]
+
+    @app.post("/api/v1/profiles", status_code=201)
+    async def create_profile(request: Request, body: ProfileCreateRequest) -> dict:
+        """CON-13 / D3 §5.3 : profil personnalisé enregistrable. Limites validées (LimitSet :
+        rebonds 1–10, etc.) avant enregistrement (D7 §9.3) ; un seul profil par défaut. Audité."""
+        await require_auth(request)
+        try:
+            limits = LimitSet(**body.limits)
+        except ValidationError as exc:
+            raise ApiError("bad_request", f"limites invalides : {exc.errors()}", 400) from exc
+        try:
+            row = await engine.repo.create_profile(
+                profile_id=body.id,
+                name=body.name,
+                limits=limits.model_dump(),
+                is_default=body.is_default,
+            )
+        except asyncpg.UniqueViolationError:
+            raise ApiError("conflict", f"profil déjà existant : {body.id}", 409)
+        _audit_op("op.profile.create", request, {"profile_id": body.id, "is_default": body.is_default})
+        return _profile_json(row)
+
+    @app.get("/api/v1/settings")
+    async def get_settings(request: Request) -> dict:
+        """CON-13 / D7 §9.1 : paramètres globaux effectifs (clés modifiables uniquement, sans secrets)."""
+        await require_auth(request)
+        return {"settings": {key: await engine.repo.get_setting(key) for key in EDITABLE_SETTINGS}}
+
+    @app.put("/api/v1/settings")
+    async def update_settings(request: Request, body: SettingsUpdateRequest) -> dict:
+        """CON-13 / D7 §9.3 : modification des paramètres globaux, validée avant enregistrement,
+        persistée et auditée. S'applique aux FUTURES opérations (D7 §9.2 : pas de rétroactivité —
+        les investigations en cours conservent leurs effective_limits)."""
+        await require_auth(request)
+        updated: dict[str, Any] = {}
+        for key, raw in body.settings.items():
+            try:
+                value = validate_setting_value(key, raw)
+            except ValueError as exc:
+                raise ApiError("bad_request", str(exc), 400) from exc
+            await engine.repo.set_setting(key, value)
+            updated[key] = value
+        if "audit_retention_days" in updated:
+            engine.audit.retention_days = int(updated["audit_retention_days"])
+        if "session_ttl_hours" in updated:
+            from datetime import timedelta
+
+            engine.sessions.ttl = timedelta(hours=int(updated["session_ttl_hours"]))
+        _audit_op("op.settings.update", request, {"keys": sorted(updated)})
+        return {"updated": updated}
 
     @app.post("/api/v1/investigations", status_code=201)
     async def create_investigation(
@@ -878,6 +922,19 @@ def _export_row_json(row) -> dict:
         "counts": _loads(row["counts"]),
         "warnings": _loads(row["warnings"]),
         "files": _loads(row["files"]),
+    }
+
+
+def _profile_json(p) -> dict:
+    return {
+        "id": p["id"],
+        "name": p["name"],
+        "max_rebonds": p["max_rebonds"],
+        "max_source_requests": p["max_source_requests"],
+        "max_ai_calls": p["max_ai_calls"],
+        "max_duration_seconds": p["max_duration_seconds"],
+        "max_cost_cents": p["max_cost_cents"],
+        "is_default": p["is_default"],
     }
 
 

@@ -68,6 +68,18 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         allowed = await engine.repo.get_setting(f"allow_experimental:{connector.manifest.id}", False)
         if not allowed:
             raise PolicyDeny("experimental_sans_autorisation_explicite", "source")
+    # CON-13 / B-ACC-06 : requête équivalente déjà satisfaite -> réutilisation du cache valide
+    # (V1.4 : TTL 24 h par défaut, D4 §6.2 fraîcheur tracée) plutôt qu'un nouvel appel externe.
+    ttl_hours = await engine.repo.get_setting("source_cache_ttl_hours", 24)
+    cached = await engine.repo.cache_get(connector.manifest.id, payload["query"])
+    if cached is not None:
+        await engine.bus.emit(
+            type="discovery",
+            investigation_id=inv["id"],
+            branch_id=task["branch_id"],
+            payload={"query": payload["query"], "cached": True, "fetched_at": cached.get("fetched_at")},
+        )
+        return {"cached": True, "connector_id": connector.manifest.id, "query": payload["query"], "result": cached}
     decision = await engine.policy.authorize(
         investigation_id=inv["id"],
         kind=OpKind.SOURCE_REQUEST,
@@ -112,6 +124,18 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         media_type=result.media_type,
         label=payload["query"],
         connector_id=result.provenance.source_id,
+    )
+    await engine.repo.cache_set(
+        connector.manifest.id,
+        payload["query"],
+        {
+            "content": result.content,
+            "media_type": result.media_type,
+            "extracted_text": result.extracted_text,
+            "url": result.provenance.url,
+            "http_status": result.provenance.http_status,
+        },
+        ttl_hours,
     )
     await engine.policy.complete_op(decision.op_id, {"http_status": result.provenance.http_status})
     await engine.bus.emit(
