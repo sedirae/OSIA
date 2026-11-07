@@ -22,6 +22,7 @@ def secure_write(path: pathlib.Path, data: bytes | str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o600)  # resserre aussi un fichier pré-existant trop permissif
         handle.write(data.encode() if isinstance(data, str) else data)
         handle.flush()
         os.fsync(handle.fileno())
@@ -161,7 +162,3 @@ class Settings:
                 "mode serveur exposé sur un host non local : HTTPS obligatoire (T5.7) — "
                 "fournir OSIA_TLS_CERTFILE/OSIA_TLS_KEYFILE ou activer OSIA_TLS_AUTOGEN=1"
             )
-
-
-def hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()

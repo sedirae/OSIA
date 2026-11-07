@@ -51,7 +51,7 @@ class SessionManager:
             "UPDATE sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
             hash_token(token),
         )
-        return cur.endswith(" 1") or cur == "UPDATE 1"
+        return cur == "UPDATE 1"  # token_hash UNIQUE : au plus une session révoquée
 
     async def revoke_all(self) -> int:
         cur = await self.pool.execute("UPDATE sessions SET revoked_at = now() WHERE revoked_at IS NULL")

@@ -87,9 +87,14 @@ class SecurityAudit:
                 continue
             if t >= cutoff:
                 kept.append(line)
+        if len(kept) == len(lines):
+            return  # rien à purger : pas de réécriture du journal
         tmp = self.path.with_suffix(".jsonl.tmp")
-        tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-        os.chmod(tmp, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(kept) + ("\n" if kept else ""))
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, self.path)
 
     def read(self, limit: int = 100) -> list[dict]:

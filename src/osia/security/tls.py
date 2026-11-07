@@ -10,6 +10,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from ..config import secure_write
+
 
 def ensure_self_signed_cert(
     directory: pathlib.Path, common_name: str = "osia.local", days: int = 365
@@ -43,14 +45,14 @@ def ensure_self_signed_cert(
         )
         .sign(key, hashes.SHA256())
     )
-    key_path.write_bytes(
+    # secure_write : 0600 dès la création (aucune fenêtre où la clé privée est lisible).
+    secure_write(
+        key_path,
         key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
-        )
+        ),
     )
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    os.chmod(key_path, 0o600)
-    os.chmod(cert_path, 0o600)
+    secure_write(cert_path, cert.public_bytes(serialization.Encoding.PEM))
     return cert_path, key_path
