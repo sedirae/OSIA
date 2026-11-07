@@ -25,6 +25,7 @@ from ..models import (
     ExportRequest,
     ImportApplyRequest,
     ImportPreviewRequest,
+    LoginRequest,
     MatchProposalRequest,
     PolicyDeny,
     StopRequest,
@@ -41,16 +42,34 @@ def create_app(engine: Engine) -> FastAPI:
     )
     settings = engine.settings
 
+    def _client(request: Request) -> str | None:
+        return request.client.host if request.client else None
+
     async def require_auth(request: Request) -> None:
-        """Mode serveur : authentification obligatoire, même sans frontend (T5.7, EXEC-05)."""
+        """Mode serveur : authentification obligatoire, même sans frontend (T5.7, EXEC-05).
+
+        Deux credentials acceptés : le jeton administrateur statique (hash comparé en constant
+        time) ou un jeton de session `sess_*` valide, non expiré et non révoqué (CON-05).
+        Tout refus est journalisé dans l'audit de sécurité (T5.9), sans jamais le secret."""
         if settings.mode != "server":
             return
         expected = settings.auth_token_hash or await engine.repo.get_setting("auth_token_hash")
         header = request.headers.get("authorization", "")
         token = header.removeprefix("Bearer ").strip()
-        digest = hashlib.sha256(token.encode()).hexdigest() if token else ""
-        if not expected or not hmac.compare_digest(digest, str(expected)):
+        if not expected:
+            engine.audit.log("auth.denied", "failure", detail={"reason": "no_token_configured"}, client=_client(request))
             raise ApiError("unauthorized", "authentification requise en mode serveur (T5.7)", 401)
+        digest = hashlib.sha256(token.encode()).hexdigest() if token else ""
+        if hmac.compare_digest(digest, str(expected)):
+            return
+        if token.startswith("sess_") and await engine.sessions.validate(token):
+            return
+        engine.audit.log("auth.denied", "failure", detail={"reason": "bad_credentials"}, client=_client(request))
+        raise ApiError("unauthorized", "authentification requise en mode serveur (T5.7)", 401)
+
+    def _audit_op(action: str, request: Request, detail: dict | None = None) -> None:
+        """Journalise une opération sensible dans l'audit de sécurité (T5.9), sans secrets."""
+        engine.audit.log(action, "success", detail=detail, client=_client(request))
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
@@ -83,6 +102,39 @@ def create_app(engine: Engine) -> FastAPI:
     async def health(request: Request) -> dict:
         await require_auth(request)
         return {"status": "ok", "version": "0.1.0", "mode": settings.mode}
+
+    @app.post("/api/v1/auth/login")
+    async def login(request: Request, body: LoginRequest) -> dict:
+        """CON-05 (T5.7) : en mode serveur, échange le jeton administrateur contre une session
+        expirable et révocable. En mode desktop, aucune authentification n'est requise (local)."""
+        if settings.mode != "server":
+            raise ApiError("bad_request", "mode desktop : aucune authentification requise (liaison locale, T1)", 400)
+        expected = settings.auth_token_hash or await engine.repo.get_setting("auth_token_hash")
+        digest = hashlib.sha256(body.token.encode()).hexdigest() if body.token else ""
+        if not expected or not hmac.compare_digest(digest, str(expected)):
+            engine.audit.log("auth.login", "failure", client=_client(request))
+            raise ApiError("unauthorized", "jeton administrateur invalide", 401)
+        token, expires = await engine.sessions.create(client_info=_client(request))
+        engine.audit.log("auth.login", "success", detail={"ttl_hours": settings.session_ttl_hours}, client=_client(request))
+        return {"session_token": token, "expires_at": expires.isoformat(), "ttl_hours": settings.session_ttl_hours}
+
+    @app.post("/api/v1/auth/logout")
+    async def logout(request: Request) -> dict:
+        """CON-05 : révoque la session présentée (le jeton statique admin reste valable)."""
+        await require_auth(request)
+        header = request.headers.get("authorization", "")
+        token = header.removeprefix("Bearer ").strip()
+        revoked = False
+        if token.startswith("sess_"):
+            revoked = await engine.sessions.revoke(token)
+        engine.audit.log("auth.logout", "success", detail={"session_revoked": revoked}, client=_client(request))
+        return {"revoked": revoked}
+
+    @app.get("/api/v1/auth/sessions")
+    async def list_sessions(request: Request) -> list[dict]:
+        """CON-05 : sessions actives (hash jamais exposé)."""
+        await require_auth(request)
+        return await engine.sessions.list_active()
 
     @app.get("/api/v1/profiles")
     async def profiles(request: Request) -> list[dict]:
@@ -363,6 +415,7 @@ def create_app(engine: Engine) -> FastAPI:
             encrypt=body.encrypt,
             passphrase=body.passphrase,
         )
+        _audit_op("op.export", request, {"investigation_id": investigation_id, "format": body.format, "encrypted": body.encrypt})
         return _export_json(result)
 
     @app.get("/api/v1/exports")
@@ -390,6 +443,7 @@ def create_app(engine: Engine) -> FastAPI:
         path = engine.settings.paths.data_dir / "exports" / export_id / file
         if not path.exists():
             raise ApiError("not_found", "fichier absent sur le serveur", 404)
+        _audit_op("op.export.download", request, {"export_id": export_id, "file": file})
         return FileResponse(path, filename=file)
 
     @app.post("/api/v1/import/preview")
@@ -422,7 +476,7 @@ def create_app(engine: Engine) -> FastAPI:
             tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
             tmp.write_bytes(raw)
             try:
-                return await engine.exchange.apply_import(
+                result = await engine.exchange.apply_import(
                     tmp,
                     mode=request.query_params.get("mode", "add"),
                     on_conflict=request.query_params.get("on_conflict", "fail"),
@@ -430,6 +484,8 @@ def create_app(engine: Engine) -> FastAPI:
                 )
             finally:
                 tmp.unlink(missing_ok=True)
+            _audit_op("op.import.apply", request, {"mode": request.query_params.get("mode", "add"), "upload": True})
+            return result
         raw = await request.body()
         if not raw:
             raise ApiError("bad_request", "corps JSON ou upload binaire requis", 400)
@@ -437,15 +493,18 @@ def create_app(engine: Engine) -> FastAPI:
             body = ImportApplyRequest(**json.loads(raw))
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise ApiError("bad_request", f"corps JSON invalide : {exc}", 400) from exc
-        return await engine.exchange.apply_import(
+        result = await engine.exchange.apply_import(
             pathlib.Path(body.path), mode=body.mode, on_conflict=body.on_conflict, passphrase=body.passphrase
         )
+        _audit_op("op.import.apply", request, {"mode": body.mode, "on_conflict": body.on_conflict})
+        return result
 
     @app.post("/api/v1/backups", status_code=201)
     async def create_backup(request: Request, body: BackupCreateRequest) -> dict:
         """Sauvegarde technique manuelle à chaud (T2.6, CON-16) : base + preuves + manifeste."""
         await require_auth(request)
         result = await engine.backup.create(dest_dir=pathlib.Path(body.dest_dir) if body.dest_dir else None)
+        _audit_op("op.backup.create", request, {"backup_id": result.get("id")})
         return result
 
     @app.get("/api/v1/backups")
@@ -464,7 +523,9 @@ def create_app(engine: Engine) -> FastAPI:
     @app.post("/api/v1/backups/{backup_id}/verify")
     async def verify_backup(backup_id: str, request: Request) -> dict:
         await require_auth(request)
-        return await engine.backup.verify(backup_id)
+        result = await engine.backup.verify(backup_id)
+        _audit_op("op.backup.verify", request, {"backup_id": backup_id, "verified": result.get("verified")})
+        return result
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
 

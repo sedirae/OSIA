@@ -45,7 +45,16 @@ class Repo:
 
     async def get_setting(self, key: str, default: Any = None) -> Any:
         row = await self._fetchrow("SELECT value FROM settings WHERE key = $1", key)
-        return row["value"] if row else default
+        if not row:
+            return default
+        value = row["value"]
+        if isinstance(value, str):
+            # colonne jsonb lue en texte brut par asyncpg : décoder le scalaire JSON
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
 
     async def set_setting(self, key: str, value: Any) -> None:
         await self.pool.execute(

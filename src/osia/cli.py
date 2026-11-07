@@ -247,6 +247,50 @@ async def _cmd_backup_restore(args) -> int:
     return 0
 
 
+async def _cmd_auth_token(args) -> int:
+    """CON-05 : affiche le jeton administrateur local (fichier 0600), jamais journalisé."""
+    settings = _settings()
+    token_file = settings.paths.config_dir / "auth_token"
+    if not token_file.exists():
+        print("aucun jeton local : démarrez en mode serveur pour en générer un, ou définissez OSIA_AUTH_TOKEN", file=sys.stderr)
+        return 1
+    print(token_file.read_text(encoding="utf-8").strip())
+    return 0
+
+
+async def _cmd_auth_rotate(args) -> int:
+    """CON-05 (T5.7) : rotation du jeton administrateur — nouveau jeton, hash mis à jour,
+    toutes les sessions révoquées, événement audité (sans secret)."""
+    import secrets
+
+    from .engine import Engine
+    from .security import hash_token
+    from .config import secure_write
+
+    engine = Engine(_settings())
+    await engine.setup()
+    token = secrets.token_urlsafe(32)
+    await engine.repo.set_setting("auth_token_hash", hash_token(token))
+    secure_write(engine.settings.paths.config_dir / "auth_token", token + "\n")
+    revoked = await engine.sessions.revoke_all()
+    engine.audit.log("auth.token.rotated", "success", detail={"sessions_revoked": revoked})
+    print(json.dumps({"rotated": True, "sessions_revoked": revoked}, ensure_ascii=False))
+    print("nouveau jeton écrit dans " + str(engine.settings.paths.config_dir / "auth_token") + " (0600)")
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_audit(args) -> int:
+    """CON-05 (T5.9) : affiche le journal d'audit de sécurité (déjà sans secrets)."""
+    from .security import SecurityAudit
+
+    settings = _settings()
+    audit = SecurityAudit(settings.paths.log_dir, retention_days=settings.audit_retention_days)
+    for entry in audit.read(limit=args.limit):
+        print(json.dumps(entry, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="osia", description="OSIA — moteur d'investigation OSINT")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -317,6 +361,15 @@ def main(argv: list[str] | None = None) -> int:
     events.add_argument("id")
     events.add_argument("--after", type=int, default=0)
     events.set_defaults(func=_cmd_events)
+
+    auth = sub.add_parser("auth", help="authentification administrateur (mode serveur, CON-05/T5.7)")
+    auth_sub = auth.add_subparsers(dest="auth_command", required=True)
+    auth_sub.add_parser("token", help="afficher le jeton administrateur local (fichier 0600)").set_defaults(func=_cmd_auth_token)
+    auth_sub.add_parser("rotate", help="générer un nouveau jeton et révoquer toutes les sessions").set_defaults(func=_cmd_auth_rotate)
+
+    audit = sub.add_parser("audit", help="afficher le journal d'audit de sécurité (T5.9, sans secrets)")
+    audit.add_argument("--limit", type=int, default=100)
+    audit.set_defaults(func=_cmd_audit)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))
