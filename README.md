@@ -11,6 +11,7 @@ Ce dossier est le remplacement documentaire préparé à partir des cadrages pro
 | Besoin | Document |
 | --- | --- |
 | Règles pour un agent de développement | [AGENTS.md](AGENTS.md) |
+| Procédure d'installation (prérequis, mise en route) | [INSTALL.md](INSTALL.md) |
 | Démarrage de la conception et limites du mandat | [PROJECT-INIT.md](PROJECT-INIT.md) |
 | Hiérarchie documentaire et index des douze lots | [CADRAGE/README.md](CADRAGE/README.md) |
 | Vue fonctionnelle transversale | [CADRAGE/FONCTIONNEL.md](CADRAGE/FONCTIONNEL.md) |
