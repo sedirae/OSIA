@@ -478,22 +478,51 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/v1/investigations/{investigation_id}/events", response_model=None)
     async def stream_events(investigation_id: str, request: Request, last_event_id: int = 0):
         await require_auth(request)
+        # F15 : le header standard Last-Event-ID est pris en compte (prioritaire sur le paramètre)
+        header_last = request.headers.get("last-event-id")
+        if header_last:
+            try:
+                last_event_id = max(last_event_id, int(header_last.strip()))
+            except ValueError:
+                pass  # header malformé ignoré, le paramètre de requête fait foi
+
+        async def replay(after_id: int) -> tuple[list, int]:
+            """Replay PAGINÉ depuis la base (F15) : aucun trou, même au-delà de 500 événements."""
+            out: list = []
+            after = after_id
+            while True:
+                page = await engine.repo.list_events(investigation_id, after_id=after, limit=500)
+                out.extend(page)
+                if len(page) < 500:
+                    break
+                after = page[-1].id
+            return out, (out[-1].id if out else after_id)
+
         if "text/event-stream" not in request.headers.get("accept", ""):
-            events = await engine.repo.list_events(investigation_id, after_id=last_event_id)
+            events, _ = await replay(last_event_id)
             return [_event_json(e) for e in events]
 
+        # F15 : on s'abonne AVANT le replay pour ne manquer aucun événement entre les deux
         queue = engine.bus.subscribe(investigation_id)
-        events = await engine.repo.list_events(investigation_id, after_id=last_event_id)
 
         async def stream():
             last_sent = last_event_id
             try:
+                events, last_sent = await replay(last_sent)
                 for event in events:
-                    last_sent = max(last_sent, event.id)
                     yield _sse(event)
                 while True:
                     if await request.is_disconnected():
                         break
+                    # F15 : saturation de la file -> resynchronisation explicite depuis la base
+                    dropped = getattr(queue, "dropped", 0)
+                    if dropped:
+                        queue.dropped = 0
+                        yield f": resync after {last_sent} dropped={dropped}\n\n"
+                        events, last_sent = await replay(last_sent)
+                        for event in events:
+                            yield _sse(event)
+                        continue
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15)
                     except asyncio.TimeoutError:

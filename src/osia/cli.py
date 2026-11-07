@@ -237,7 +237,12 @@ async def _cmd_backup_restore(args) -> int:
         await engine.pool.close()
         return 1
     try:
-        result = await engine.backup.restore(args.id, confirm=True, target_dsn=args.target_dsn)
+        result = await engine.backup.restore(
+            args.id,
+            confirm=True,
+            target_dsn=args.target_dsn,
+            target_proofs_dir=pathlib.Path(args.target_proofs_dir) if getattr(args, "target_proofs_dir", None) else None,
+        )
     except BackupError as exc:
         print(str(exc), file=sys.stderr)
         await engine.pool.close()
@@ -722,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
     brestore.add_argument("id")
     brestore.add_argument("--yes", action="store_true", help="confirmation explicite requise")
     brestore.add_argument("--target-dsn", help="DSN cible (défaut : base courante)")
+    brestore.add_argument("--target-proofs-dir", help="dossier de preuves cible (obligatoire avec --target-dsn ; les preuves courantes ne sont jamais modifiées)")
     brestore.set_defaults(func=_cmd_backup_restore)
 
     op = sub.add_parser("op", help="gérer les opérations externes")
