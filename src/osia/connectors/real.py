@@ -83,6 +83,7 @@ class RechercheEntreprisesConnector(HttpConnector):
                 id="gouv.recherche-entreprises",
                 version="1.0.0",
                 trust_level=TrustLevel.OFFICIAL,
+                primary_source=True,  # registre officiel = source primaire (audit F07)
                 provider="DINUM — api.gouv.fr",
                 scope="France — entreprises et établissements (SIREN/SIRET)",
                 categories=["entreprises", "établissements", "dirigeants (via fiche)"],
@@ -149,6 +150,7 @@ class BodaccConnector(HttpConnector):
                 id="gouv.bodacc",
                 version="1.0.0",
                 trust_level=TrustLevel.OFFICIAL,
+                primary_source=True,  # registre officiel = source primaire (audit F07)
                 provider="DILA — BODACC (Bulletin officiel des annonces civiles et commerciales)",
                 scope="France — annonces légales des entreprises (procédures collectives, actes RCS)",
                 categories=["annonces légales", "procédures collectives", "événements d'entreprise"],
@@ -201,6 +203,7 @@ class GleifConnector(HttpConnector):
                 id="gleif.lei",
                 version="1.0.0",
                 trust_level=TrustLevel.OFFICIAL,
+                primary_source=True,  # registre officiel = source primaire (audit F07)
                 provider="GLEIF — Global Legal Entity Identifier Foundation",
                 scope="International — LEI et relations de parenté déclarées",
                 categories=["entreprises internationales", "LEI", "relations de parenté"],

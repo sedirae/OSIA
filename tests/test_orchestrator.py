@@ -19,10 +19,14 @@ async def wait_state(engine, inv_id, states, timeout=10.0):
 
 def demo_only_connectors(engine):
     """Mode démo explicite (audit F05) : seuls les connecteurs simulés restent actifs pendant ce
-    test hors ligne — la sélection automatique retombe alors sur simulated.web (visible)."""
+    test hors ligne — la sélection automatique retombe alors sur simulated.web (visible).
+    F07 : en mode démo, la source simulée fait office de source primaire."""
     ids = [e["id"] for e in engine.registry.list() if not e["id"].startswith("simulated.")]
     for cid in ids:
         engine.registry.set_enabled(cid, False)
+    sim = engine.registry.get("simulated.web")
+    if sim is not None:
+        sim.manifest.primary_source = True
     return ids
 
 

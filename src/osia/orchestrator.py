@@ -101,6 +101,11 @@ class Orchestrator:
         inv = await self.repo.get_investigation(investigation_id)
         if inv is None:
             raise PolicyDeny("investigation_inconnue", "branche")
+        # F08 : une branche explicite sur une investigation arrêtée la RÉACTIVE (c'est la
+        # nouvelle autorisation : explicit_acceptance requis, plafonds <= parent). Sur une
+        # investigation suspendue, la reprise explicite (resume) reste requise.
+        if inv["state"] not in ("running", "stopped"):
+            raise PolicyDeny(f"reprise_requise:{inv['state']}", "branche")
         inv_limits = limits_from_record(inv)
         profile = await self.repo.get_profile(inv["profile_id"])
         if profile is None:
@@ -130,6 +135,14 @@ class Orchestrator:
                 raise PolicyDeny("profondeur_max_atteinte", "branche")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if inv["state"] == "stopped":
+                    # F08 : la branche explicite autonome réactive l'investigation arrêtée
+                    # (les anciennes branches restent arrêtées ; seules les tâches de la
+                    # nouvelle branche seront exécutées).
+                    await conn.execute(
+                        "UPDATE investigations SET state = 'running', stop_reason = NULL, updated_at = now() WHERE id = $1",
+                        investigation_id,
+                    )
                 branch = _norm_row(
                     await conn.fetchrow(
                         "INSERT INTO branches (id, investigation_id, parent_branch_id, objective, effective_limits, state, depth, idempotency_key) "
@@ -151,6 +164,12 @@ class Orchestrator:
                     branch["id"],
                     json.dumps({"objective": req.objective}, ensure_ascii=False),
                 )
+        if inv["state"] == "stopped":
+            await self.bus.emit(
+                type="investigation.reactivated",
+                investigation_id=investigation_id,
+                payload={"reason": "branche_explicite", "branch_id": branch["id"]},
+            )
         await self.bus.emit(
             type="branch.created",
             investigation_id=investigation_id,
@@ -208,9 +227,16 @@ class Orchestrator:
 
     async def suspend(self, investigation_id: str) -> asyncpg.Record:
         inv = await self.repo.set_investigation_state(investigation_id, InvestigationState.SUSPENDED.value)
+        # F08 : une pause n'est PAS une annulation définitive — les tâches en file/en cours
+        # passent 'interrupted' (re-mises en file par resume()), distinct de 'cancelled' (stop).
         await self.pool.execute(
-            "UPDATE tasks SET state = 'cancelled', updated_at = now(), finished_at = now() "
-            "WHERE investigation_id = $1 AND state IN ('queued','claimed')",
+            "UPDATE tasks SET state = 'interrupted', updated_at = now() "
+            "WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
+            investigation_id,
+        )
+        await self.pool.execute(
+            "UPDATE branches SET state = 'suspended', updated_at = now() "
+            "WHERE investigation_id = $1 AND state = 'running'",
             investigation_id,
         )
         # F04 : idem stop — jamais-envoyé libéré, envoyé passé en uncertain
@@ -277,5 +303,38 @@ class Orchestrator:
         elif reason in ("plafond_requetes_source_atteint", "plafond_appels_ia_atteint"):
             await self.stop(task["investigation_id"], StopReason.SOURCES)
 
+    async def _maybe_terminate_if_exhausted(self, investigation_id: str, note: str = "") -> None:
+        """F08 : état terminal explicite — si l'investigation est encore 'running' sans aucune
+        tâche exécutable (queued/claimed/running), elle est arrêtée (work_exhausted) au lieu de
+        rester 'running' indéfiniment (plan vide, plus de suite, tâches en échec)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if inv is None or inv["state"] != "running":
+                    return
+                pending = await conn.fetchval(
+                    "SELECT COUNT(*) FROM tasks WHERE investigation_id = $1 AND state IN ('queued','claimed','running')",
+                    investigation_id,
+                )
+                if pending:
+                    return
+        await self.stop(investigation_id, StopReason.EXHAUSTED)
+        await self.bus.emit(
+            type="investigation.exhausted",
+            investigation_id=investigation_id,
+            payload={"note": note},
+        )
+
     async def on_task_succeeded(self, task: asyncpg.Record, result: dict[str, Any]) -> None:
-        return None
+        await self._maybe_terminate_if_exhausted(
+            task["investigation_id"], note=f"tâche {task['id']} réussie, aucun travail exécutable restant"
+        )
+
+    async def on_task_failed(self, task: asyncpg.Record, error: str) -> None:
+        """F08 : idem après un échec — un plan vide ou une chaîne rompue termine l'investigation
+        explicitement au lieu de laisser 'running' sans tâche exécutable."""
+        await self._maybe_terminate_if_exhausted(
+            task["investigation_id"], note=f"tâche {task['id']} en échec ({error}), aucun travail exécutable restant"
+        )

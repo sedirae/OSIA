@@ -22,6 +22,11 @@ class ConnectorManifest(BaseModel):
     id: str
     version: str
     trust_level: TrustLevel = TrustLevel.OFFICIAL
+    # Provenance primaire (audit F07) : DISTINCT de trust_level. Un connecteur "official" comme
+    # web.url ou simulated.web a confiance technique mais son contenu n'est PAS une source
+    # primaire (page web quelconque, simulation). Seuls les registres officiels (gouv.*, GLEIF…)
+    # sont primary_source=True.
+    primary_source: bool = False
     provider: str = ""
     scope: str = ""  # périmètre géographique ou thématique
     categories: list[str] = Field(default_factory=list)
