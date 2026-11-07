@@ -410,10 +410,33 @@ def create_app(engine: Engine) -> FastAPI:
             tmp.unlink(missing_ok=True)
 
     @app.post("/api/v1/import/apply", status_code=201)
-    async def import_apply(request: Request, body: ImportApplyRequest) -> dict:
+    async def import_apply(request: Request):
         """Application supervisée d'un import (T7.6, D5.7.2) : transaction unique, conflits
-        explicites, aucune reprise de recherche ni appel IA."""
+        explicites, aucune reprise de recherche ni appel IA. Accepte un corps JSON {path, mode,
+        on_conflict, passphrase} ou un upload binaire application/octet-stream (client web ;
+        mode/on_conflict/passphrase en query params)."""
         await require_auth(request)
+        ct = request.headers.get("content-type", "")
+        if ct.startswith("application/octet-stream"):
+            raw = await request.body()
+            tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
+            tmp.write_bytes(raw)
+            try:
+                return await engine.exchange.apply_import(
+                    tmp,
+                    mode=request.query_params.get("mode", "add"),
+                    on_conflict=request.query_params.get("on_conflict", "fail"),
+                    passphrase=request.query_params.get("passphrase") or None,
+                )
+            finally:
+                tmp.unlink(missing_ok=True)
+        raw = await request.body()
+        if not raw:
+            raise ApiError("bad_request", "corps JSON ou upload binaire requis", 400)
+        try:
+            body = ImportApplyRequest(**json.loads(raw))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ApiError("bad_request", f"corps JSON invalide : {exc}", 400) from exc
         return await engine.exchange.apply_import(
             pathlib.Path(body.path), mode=body.mode, on_conflict=body.on_conflict, passphrase=body.passphrase
         )
@@ -442,6 +465,32 @@ def create_app(engine: Engine) -> FastAPI:
     async def verify_backup(backup_id: str, request: Request) -> dict:
         await require_auth(request)
         return await engine.backup.verify(backup_id)
+
+    web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
+
+    @app.get("/", include_in_schema=False)
+    async def index(request: Request):
+        """Interface web (lot C, CON-17) servie par le moteur ; protégée comme l'API en mode
+        serveur même avec frontend (T5.7, EXEC-05)."""
+        await require_auth(request)
+        return FileResponse(web_dir / "index.html", media_type="text/html; charset=utf-8")
+
+    @app.get("/static/{file_path:path}", include_in_schema=False)
+    async def static_asset(file_path: str, request: Request):
+        await require_auth(request)
+        candidate = (web_dir / file_path).resolve()
+        if candidate != web_dir and web_dir not in candidate.parents:
+            raise ApiError("not_found", "fichier inconnu", 404)
+        if not candidate.is_file():
+            raise ApiError("not_found", "fichier inconnu", 404)
+        media = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".json": "application/json; charset=utf-8",
+        }.get(candidate.suffix.lower(), "application/octet-stream")
+        return FileResponse(candidate, media_type=media)
 
     return app
 
