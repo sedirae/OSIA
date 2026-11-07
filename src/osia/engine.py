@@ -5,7 +5,8 @@ import asyncio
 from .ai import AIBroker, SimulatedAIAdapter
 from .backup import BackupService
 from .config import Settings
-from .connectors import ConnectorRegistry, SimulatedConnector
+from .connectors import ConnectorHealthChecker, ConnectorRegistry, SimulatedConnector
+from .connectors.real import build_real_connectors
 from .events import EventBus
 from .exchange import ExchangeService
 from .netguard import NetworkGuard, NetworkPolicy
@@ -44,6 +45,7 @@ class Engine:
         self.sessions: SessionManager
         self.netguard: NetworkGuard
         self.secrets: SecretStore
+        self.health: ConnectorHealthChecker
         self.external_semaphore: asyncio.Semaphore
         self._runner: asyncio.Task | None = None
 
@@ -88,6 +90,11 @@ class Engine:
         allowed_domains = set(self.settings.net_allow_domains)
         for entry in self.registry.list():
             allowed_domains.update(entry.get("domains", []))
+        # Connecteurs réels V1.2 (CON-07/CON-08, PERIMETRE-V1 §V1.2) : leurs domaines alimentent
+        # l'allowlist du NetworkGuard avant sa création, puis reçoivent le guard (T5.4).
+        real_connectors = build_real_connectors()
+        for c in real_connectors:
+            allowed_domains.update(c.manifest.domains)
         self.netguard = NetworkGuard(
             NetworkPolicy(
                 allowed_domains=allowed_domains,
@@ -96,6 +103,11 @@ class Engine:
             ),
             audit=self.audit,
         )
+        for c in real_connectors:
+            c.netguard = self.netguard
+            self.registry.register(c)
+            self.policy.allow_target(c.manifest.id)
+        self.health = ConnectorHealthChecker(self.registry)
         self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
 
     async def start(self) -> dict:

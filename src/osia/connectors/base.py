@@ -15,13 +15,25 @@ class TrustLevel(str, enum.Enum):
 
 
 class ConnectorManifest(BaseModel):
+    """Manifeste complet d'un connecteur (B1 §3.2, B7 §9.4) : identité, fournisseur, périmètre,
+    catégories de données, méthodes d'accès, authentification, contraintes/quotas/coûts,
+    conditions d'utilisation et date de vérification."""
+
     id: str
     version: str
     trust_level: TrustLevel = TrustLevel.OFFICIAL
+    provider: str = ""
+    scope: str = ""  # périmètre géographique ou thématique
+    categories: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
+    access_methods: list[str] = Field(default_factory=list)
+    auth: str = "none"  # none | api_key | oauth | ...
     domains: list[str] = Field(default_factory=list)
     paid: bool = False
     cost_per_call_cents: Optional[int] = None
+    quotas: str = ""
+    conditions_url: Optional[str] = None
+    last_checked: Optional[str] = None  # date de vérification des conditions (B7 §9.4)
     http_timeout_seconds: int = 15
 
 
@@ -53,3 +65,8 @@ class Connector(ABC):
     @abstractmethod
     async def fetch(self, request: FetchRequest) -> FetchResult:
         ...
+
+    def validate_response(self, payload: Any) -> list[str]:
+        """Contrôle sémantique (B7 §9.1) : liste des problèmes de structure de la réponse.
+        Une réponse HTTP 200 ne suffit pas à prouver la validité fonctionnelle."""
+        return []
