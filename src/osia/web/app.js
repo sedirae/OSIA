@@ -12,7 +12,7 @@
   var HUMAN_LABEL = { unexamined: 'non examiné', validated: 'validé', rejected: 'rejeté' };
   var NATURE_LABEL = { fait_etabli: 'fait établi', information_rapportee: 'information rapportée', indice: 'indice', hypothese: 'hypothèse', conclusion_analytique: 'conclusion analytique' };
   var STATE_LABEL = { created: 'non lancée', running: 'en cours', suspended: 'suspendue', stopped: 'arrêtée', error: 'en erreur' };
-  var STOP_LABEL = { objective_suffisamment_etaye: 'objectif suffisamment étayé', depth_limit: 'limite de profondeur', budget_exhausted: 'budget épuisé', sources_exhausted: 'sources épuisées', user_interrupt: 'arrêt demandé par l’utilisateur', technical_error: 'erreur technique', security_block: 'blocage sécurité' };
+  var STOP_LABEL = { objective_suffisamment_etaye: 'objectif suffisamment étayé', depth_limit: 'limite de profondeur', budget_exhausted: 'budget épuisé', sources_exhausted: 'sources épuisées', user_interrupt: 'arrêt demandé par l’utilisateur', technical_error: 'erreur technique', security_block: 'blocage sécurité', work_exhausted: 'travail épuisé (plus de tâche exécutable)' };
   var KIND_COLORS = { personne: '#2458C6', organisation: '#6B4FA1', adresse: '#0E7C7B', domaine: '#B3261E', document: '#8A5A00', evenement: '#1E7B34', autre: '#5A6478' };
 
   var state = {

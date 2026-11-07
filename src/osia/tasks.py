@@ -494,8 +494,8 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
             )
         return {"conclusion": synthesis.conclusion, "rebond": task["depth"] + 1}
     # F08 : les pistes proposées mais non lancées (limite de profondeur) sont restituées
-    # explicitement, pas perdues silencieusement.
-    followups_non_lancees = synthesis.suggested_followups[: limits.max_source_requests]
+    # explicitement — TOUTES, pas seulement celles sous le plafond (P3-4 audit PR #21).
+    followups_non_lancees = list(synthesis.suggested_followups)
     await engine.bus.emit(
         type="synthesis.followups_non_lances",
         investigation_id=inv["id"],

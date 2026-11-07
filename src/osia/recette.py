@@ -149,6 +149,7 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
     connector.fail_on = set(spec.get("fail_on", []))
     connector.calls.clear()
     # F07 : en mode démo, le registre simulé fait office de source primaire (primary_source=True)
+    prev_primary = connector.manifest.primary_source
     connector.manifest.primary_source = True
     # F05 : mode démo explicitement visible — seuls les connecteurs simulés restent actifs pendant
     # la recette hors ligne ; la sélection automatique retombe donc sur simulated.web (et le
@@ -202,7 +203,7 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
                 "separated": set(releve["entities"]).isdisjoint(releve2["entities"]),
             }
     finally:
-        connector.manifest.primary_source = False
+        connector.manifest.primary_source = prev_primary
         for cid, was_enabled in prev_enabled.items():
             engine.registry.set_enabled(cid, was_enabled)
         if manage_engine:
