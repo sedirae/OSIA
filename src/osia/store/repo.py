@@ -305,16 +305,18 @@ class Repo:
         source_url: Optional[str] = None,
         media_type: Optional[str] = None,
         label: Optional[str] = None,
+        connector_id: Optional[str] = None,
     ) -> asyncpg.Record:
         return await self._fetchrow(
-            "INSERT INTO proof_refs (id, investigation_id, proof_sha256, source_url, media_type, label) "
-            "VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+            "INSERT INTO proof_refs (id, investigation_id, proof_sha256, source_url, media_type, label, connector_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
             new_id("proof"),
             investigation_id,
             sha256,
             source_url,
             media_type,
             label,
+            connector_id,
         )
 
     async def list_proof_refs(self, investigation_id: str) -> list[asyncpg.Record]:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -9,8 +8,7 @@ import asyncpg
 
 from .ai.schemas import Extraction, PlanProposal, Synthesis
 from .connectors.base import FetchRequest
-from .ids import new_id
-from .models import OpKind, PolicyDeny, StopReason
+from .models import ClaimNature, OpKind, PolicyDeny, StopReason, SupportLevel
 from .policies.limits import limits_from_record
 
 if TYPE_CHECKING:
@@ -108,6 +106,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         source_url=result.provenance.url,
         media_type=result.media_type,
         label=payload["query"],
+        connector_id=result.provenance.source_id,
     )
     await engine.policy.complete_op(decision.op_id, {"http_status": result.provenance.http_status})
     await engine.bus.emit(
@@ -128,23 +127,30 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     )
     entity_ids: dict[str, str] = {}
     for entity in extraction.entities:
-        entity_ids[entity.name] = await engine.pool.fetchval(
-            "INSERT INTO entities (id, investigation_id, kind, data) VALUES ($1, $2, $3, $4::jsonb) RETURNING id",
-            new_id("ent"),
+        upserted = await engine.graph.upsert_entity(
             inv["id"],
-            entity.kind,
-            json.dumps({"name": entity.name, "identifiers": entity.identifiers}, ensure_ascii=False),
+            kind=entity.kind,
+            data={"name": entity.name, "identifiers": entity.identifiers},
+            identifiers=entity.identifiers,
+            branch_id=task["branch_id"],
         )
+        entity_ids[entity.name] = upserted["entity_id"]
+    support_map = {
+        "confirmed": SupportLevel.CORROBORE,
+        "hypothesis": SupportLevel.A_CONFIRMER,
+        "contradicted": SupportLevel.CONTRADICTOIRE,
+    }
     for relation in extraction.relations:
         if relation.src in entity_ids and relation.dst in entity_ids:
-            await engine.pool.execute(
-                "INSERT INTO relations (id, investigation_id, src_id, dst_id, type, status) VALUES ($1, $2, $3, $4, $5, $6)",
-                new_id("rel"),
+            await engine.graph.add_relation(
                 inv["id"],
-                entity_ids[relation.src],
-                entity_ids[relation.dst],
-                relation.type,
-                relation.status,
+                branch_id=task["branch_id"],
+                src_id=entity_ids[relation.src],
+                dst_id=entity_ids[relation.dst],
+                type=relation.type,
+                support_level=support_map.get(relation.status, SupportLevel.A_CONFIRMER),
+                proof_ids=[proof["proof_ref_id"]],
+                derivation="ia",
             )
     await engine.repo.insert_task(
         investigation_id=inv["id"],
@@ -173,21 +179,51 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
         task_id=task["id"],
         depth=task["depth"],
     )
-    from .ids import new_id
-
-    await engine.pool.execute(
-        "INSERT INTO assertions (id, investigation_id, branch_id, statement, nature, support, proof_ids) "
-        "VALUES ($1, $2, $3, $4, 'conclusion analytique', $5, $6::jsonb)",
-        new_id("assert"),
+    proof_rows = await engine.repo.list_proof_refs(inv["id"])
+    proof_ids = []
+    for source in synthesis.decisive_sources:
+        matched = [r["id"] for r in proof_rows if r["source_url"] and r["source_url"] == source]
+        proof_ids.extend(matched)
+    proof_ids = list(dict.fromkeys(proof_ids))
+    support_map = {
+        "documenté": SupportLevel.DOCUMENTE,
+        "corroboré": SupportLevel.CORROBORE,
+        "à confirmer": SupportLevel.A_CONFIRMER,
+        "contradictoire": SupportLevel.CONTRADICTOIRE,
+        "non établi": SupportLevel.NON_ETABLI,
+    }
+    assertion = await engine.graph.add_assertion(
         inv["id"],
-        task["branch_id"],
-        synthesis.conclusion,
-        synthesis.support,
-        json.dumps(synthesis.decisive_sources, ensure_ascii=False),
+        branch_id=task["branch_id"],
+        statement=synthesis.conclusion,
+        nature=ClaimNature.CONCLUSION_ANALYTIQUE,
+        support_level=support_map.get(synthesis.support, SupportLevel.A_CONFIRMER),
+        proof_ids=proof_ids,
+        decisive=True,
+        derivation="ia",
     )
-    if synthesis.objective_sufficiently_supported:
+    for contradiction in synthesis.contradictions:
+        await engine.graph.add_assertion(
+            inv["id"],
+            branch_id=task["branch_id"],
+            statement=contradiction,
+            nature=ClaimNature.HYPOTHESE,
+            support_level=SupportLevel.CONTRADICTOIRE,
+            proof_ids=proof_ids,
+            decisive=False,
+            derivation="ia",
+            contradicted_by=[assertion["id"]],
+        )
+    objectif = await engine.graph.objective_etaye(inv["id"], task["branch_id"])
+    await engine.bus.emit(
+        type="objective.evalue",
+        investigation_id=inv["id"],
+        branch_id=task["branch_id"],
+        payload={**objectif, "proposition_ia": synthesis.objective_sufficiently_supported},
+    )
+    if objectif["etaye"]:
         await engine.orchestrator.stop(inv["id"], StopReason.OBJECTIVE)
-        return {"conclusion": synthesis.conclusion, "stop": "objective_suffisamment_etaye"}
+        return {"conclusion": synthesis.conclusion, "stop": "objective_suffisamment_etaye", "objectif": objectif}
     if task["depth"] < limits.max_rebonds:
         for followup in synthesis.suggested_followups[: limits.max_source_requests]:
             await engine.repo.insert_task(

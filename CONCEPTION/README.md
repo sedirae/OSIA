@@ -13,7 +13,9 @@ Chaque document cite les décisions respectées et distingue *exigence* (cadrage
 | [03-etats-ordonnanceur-reprise.md](03-etats-ordonnanceur-reprise.md) | CON-03 : machine à états, ordonnanceur persistant PostgreSQL, concurrence, reprise et réconciliation | T3.5/T3.6/T3.12, T4.2/T4.7/T4.8, OSIA-I-09 |
 | [04-protocole-financier.md](04-protocole-financier.md) | CON-04 : devise/période, plafonds hiérarchiques, réservations transactionnelles, réconciliation | B6, T8.4, D3/D7, V1.4, OSIA-I-02 |
 | [05-contrats-transversaux.md](05-contrats-transversaux.md) | Contrats internes typés, événements/SSE, API REST `/api/v1`, contrat connecteur, contrat courtier IA, sécurité des modes | T3.7/T3.9/T3.13, T4.9, T5.7, V1.3/V1.5, CON-07/CON-11/CON-12 |
+| [06-graphe-identite-decisions.md](06-graphe-identite-decisions.md) | CON-09 : entités/identifiants, relations sourcées, assertions, rapprochement d'identité, fusions supervisées réversibles, décisions historisées | A9–A12, C5/C6, T6.1–T6.9 |
+| [07-etayage-confiance-objectif.md](07-etayage-confiance-objectif.md) | CON-10 : confiance multidimensionnelle qualitative, natures, critère d'objectif suffisamment étayé décidé par le moteur | A5, B5, C3, T4.6, T6.7, V1.4 |
 
 ## État
 
-Tranche 1 (socle) en cours : CON-01 à CON-04 + contrats transversaux du socle. Les lots suivants (graphe T6, restitution T7, web C) suivront par tranches séparées.
+Tranche 1 (socle) livrée : CON-01 à CON-04 + contrats transversaux du socle. Tranche 2 (graphe T6 + correction) en cours : CON-09 + CON-10. Suivront par tranches séparées : restitution T7, web C, puis CON-05–CON-08/CON-11–CON-19 selon CONCEPTION-RESTANTE.
