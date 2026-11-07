@@ -114,6 +114,14 @@ class ConnectorToggleRequest(BaseModel):
     confirm: bool = False
 
 
+class HealthCheckRequest(BaseModel):
+    """CON-07/CON-08 / B7 §9.1 : contrôle manuel de santé. Sans `connector_id`, tous les
+    connecteurs enregistrés sont contrôlés. `probe_query` remplace la sonde par défaut."""
+
+    connector_id: Optional[str] = None
+    probe_query: Optional[str] = None
+
+
 class Event(BaseModel):
     id: int
     investigation_id: Optional[str]

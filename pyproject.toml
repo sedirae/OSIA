@@ -17,6 +17,7 @@ dependencies = [
   "uvicorn>=0.29",
   "cryptography>=43",
   "argon2-cffi>=23",
+  "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]

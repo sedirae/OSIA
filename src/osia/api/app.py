@@ -24,6 +24,7 @@ from ..models import (
     DecisionRequest,
     ExportRequest,
     ConnectorToggleRequest,
+    HealthCheckRequest,
     ImportApplyRequest,
     ImportPreviewRequest,
     LoginRequest,
@@ -592,6 +593,43 @@ def create_app(engine: Engine) -> FastAPI:
         _audit_op("op.connector.toggle", request, {"connector_id": connector_id, "enabled": body.enabled, "trust_level": manifest["trust_level"]})
         return {"id": connector_id, "enabled": body.enabled}
 
+    @app.get("/api/v1/connectors/{connector_id}/health")
+    async def connector_health(connector_id: str, request: Request) -> dict:
+        """CON-07/CON-08 / B7 §9.1 : dernier état de surveillance connu d'un connecteur
+        (operationnel | degrade | suspendu | obsolete | inconnu). V1 : contrôles manuels."""
+        await require_auth(request)
+        known = {e["id"] for e in engine.registry.list()}
+        if connector_id not in known:
+            raise ApiError("not_found", "connecteur inconnu", 404)
+        report = engine.health.last_report(connector_id)
+        if report is None:
+            return {
+                "connector_id": connector_id,
+                "state": "inconnu",
+                "checked_at": None,
+                "detail": "aucun contrôle effectué (V1 : contrôles manuels via POST /api/v1/connectors/health-check)",
+                "http_status": None,
+                "validation_problems": [],
+                "probe_url": None,
+            }
+        return _health_json(report)
+
+    @app.post("/api/v1/connectors/health-check")
+    async def health_check(request: Request, body: HealthCheckRequest) -> dict:
+        """CON-07/CON-08 / B7 §9.1 : contrôle manuel de santé (sonde légère + validation
+        sémantique de la réponse). Audité (T5.9). Aucun sondage planifié en V1 (B7 §9.5)."""
+        await require_auth(request)
+        if body.connector_id:
+            reports = [await engine.health.check(body.connector_id, body.probe_query)]
+        else:
+            reports = await engine.health.check_all(body.probe_query)
+        _audit_op(
+            "op.connector.health_check",
+            request,
+            {"connector_id": body.connector_id, "states": {r.connector_id: r.state.value for r in reports}},
+        )
+        return {"reports": [_health_json(r) for r in reports]}
+
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
 
     @app.get("/", include_in_schema=False)
@@ -783,6 +821,18 @@ def _export_row_json(row) -> dict:
         "counts": _loads(row["counts"]),
         "warnings": _loads(row["warnings"]),
         "files": _loads(row["files"]),
+    }
+
+
+def _health_json(report) -> dict:
+    return {
+        "connector_id": report.connector_id,
+        "state": report.state.value,
+        "checked_at": report.checked_at.isoformat(),
+        "detail": report.detail,
+        "http_status": report.http_status,
+        "validation_problems": report.validation_problems,
+        "probe_url": report.probe_url,
     }
 
 
