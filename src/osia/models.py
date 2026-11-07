@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -213,3 +213,39 @@ class MatchProposalRequest(BaseModel):
     basis: MatchBasis = MatchBasis.SIMILARITY
     justification: str = ""
     confidence: ConfidenceLevel = ConfidenceLevel.FAIBLE
+
+
+class ExportRequest(BaseModel):
+    """Export d'une investigation (D5, T7.4) : archive .osia, rapport HTML autonome, ou les deux.
+
+    La phrase secrete (chiffrement facultatif, CON-15) n'est jamais journalisee (OSIA-I-12)."""
+
+    format: Literal["osia", "html", "both"] = "osia"
+    branch_ids: Optional[list[str]] = None
+    include_proofs: bool = True
+    exclusions: list[str] = Field(default_factory=list)
+    encrypt: bool = False
+    passphrase: Optional[str] = None
+
+
+class ImportPreviewRequest(BaseModel):
+    """Previsualisation d'une archive .osia avant toute modification (T7.6)."""
+
+    path: str
+    passphrase: Optional[str] = None
+
+
+class ImportApplyRequest(BaseModel):
+    """Application supervisee d'un import (T7.6, D5.7.2) : aucun ecrasement silencieux,
+    aucune reprise de recherche automatique."""
+
+    path: str
+    mode: Literal["add", "merge"] = "add"
+    on_conflict: Literal["fail", "skip"] = "fail"
+    passphrase: Optional[str] = None
+
+
+class BackupCreateRequest(BaseModel):
+    """Sauvegarde technique manuelle a chaud (T2.6, CON-16)."""
+
+    dest_dir: Optional[str] = None

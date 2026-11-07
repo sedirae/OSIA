@@ -4,18 +4,27 @@ import asyncio
 import hashlib
 import hmac
 import json
+import pathlib
 from typing import Optional
 
 import asyncpg
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from ..backup import BackupError
 from ..engine import Engine
+from ..exchange import ArchiveError, CryptoError, ImportConflictError
+from ..exchange.service import ExchangeService
+from ..ids import new_id
 from ..models import (
     ApiError,
+    BackupCreateRequest,
     CreateBranchRequest,
     CreateInvestigationRequest,
     DecisionRequest,
+    ExportRequest,
+    ImportApplyRequest,
+    ImportPreviewRequest,
     MatchProposalRequest,
     PolicyDeny,
     StopRequest,
@@ -50,6 +59,25 @@ def create_app(engine: Engine) -> FastAPI:
     @app.exception_handler(PolicyDeny)
     async def policy_error_handler(request: Request, exc: PolicyDeny) -> JSONResponse:
         return JSONResponse(status_code=403, content={"error": {"code": "policy_denied", "message": exc.reason, "scope": exc.scope}})
+
+    @app.exception_handler(ArchiveError)
+    async def archive_error_handler(request: Request, exc: ArchiveError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": {"code": "archive_invalid", "message": str(exc)}})
+
+    @app.exception_handler(CryptoError)
+    async def crypto_error_handler(request: Request, exc: CryptoError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": {"code": "crypto_error", "message": str(exc)}})
+
+    @app.exception_handler(ImportConflictError)
+    async def import_conflict_handler(request: Request, exc: ImportConflictError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "import_conflict", "message": str(exc), "details": {"conflicts": exc.conflicts}}},
+        )
+
+    @app.exception_handler(BackupError)
+    async def backup_error_handler(request: Request, exc: BackupError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": {"code": "backup_error", "message": str(exc)}})
 
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict:
@@ -317,6 +345,104 @@ def create_app(engine: Engine) -> FastAPI:
 
         return StreamingResponse(stream(), media_type="text/event-stream")
 
+    @app.post("/api/v1/investigations/{investigation_id}/export", status_code=201)
+    async def export_investigation(
+        investigation_id: str, request: Request, body: ExportRequest
+    ) -> dict:
+        """Export supervisé : archive .osia, rapport HTML autonome, ou les deux (D5, T7.4/T7.5).
+
+        La phrase de chiffrement n'est jamais journalisée (OSIA-I-12)."""
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        result = await engine.exchange.export_investigation(
+            investigation_id,
+            format=body.format,
+            branch_ids=body.branch_ids,
+            include_proofs=body.include_proofs,
+            exclusions=set(body.exclusions),
+            encrypt=body.encrypt,
+            passphrase=body.passphrase,
+        )
+        return _export_json(result)
+
+    @app.get("/api/v1/exports")
+    async def list_exports(request: Request) -> list[dict]:
+        await require_auth(request)
+        return [_export_row_json(r) for r in await engine.exchange.list_exports()]
+
+    @app.get("/api/v1/exports/{export_id}")
+    async def get_export(export_id: str, request: Request) -> dict:
+        await require_auth(request)
+        row = await engine.exchange.get_export(export_id)
+        if row is None:
+            raise ApiError("not_found", "export inconnu", 404)
+        return _export_row_json(row)
+
+    @app.get("/api/v1/exports/{export_id}/download")
+    async def download_export(export_id: str, request: Request, file: str = "archive.osia"):
+        await require_auth(request)
+        row = await engine.exchange.get_export(export_id)
+        if row is None:
+            raise ApiError("not_found", "export inconnu", 404)
+        allowed = {f["file"] for f in _loads(row["files"]) if isinstance(f, dict)}
+        if file not in allowed:
+            raise ApiError("not_found", f"fichier non présent dans cet export: {file}", 404)
+        path = engine.settings.paths.data_dir / "exports" / export_id / file
+        if not path.exists():
+            raise ApiError("not_found", "fichier absent sur le serveur", 404)
+        return FileResponse(path, filename=file)
+
+    @app.post("/api/v1/import/preview")
+    async def import_preview(request: Request):
+        """Prévisualisation d'une archive .osia (T7.6) : JSON {path, passphrase} ou upload
+        binaire (application/octet-stream). Aucune modification locale."""
+        await require_auth(request)
+        raw = await request.body()
+        ct = request.headers.get("content-type", "")
+        if ct.startswith("application/json") and raw:
+            body = ImportPreviewRequest(**json.loads(raw))
+            return await engine.exchange.preview_import(pathlib.Path(body.path), body.passphrase)
+        tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
+        tmp.write_bytes(raw)
+        try:
+            return await engine.exchange.preview_import(tmp)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @app.post("/api/v1/import/apply", status_code=201)
+    async def import_apply(request: Request, body: ImportApplyRequest) -> dict:
+        """Application supervisée d'un import (T7.6, D5.7.2) : transaction unique, conflits
+        explicites, aucune reprise de recherche ni appel IA."""
+        await require_auth(request)
+        return await engine.exchange.apply_import(
+            pathlib.Path(body.path), mode=body.mode, on_conflict=body.on_conflict, passphrase=body.passphrase
+        )
+
+    @app.post("/api/v1/backups", status_code=201)
+    async def create_backup(request: Request, body: BackupCreateRequest) -> dict:
+        """Sauvegarde technique manuelle à chaud (T2.6, CON-16) : base + preuves + manifeste."""
+        await require_auth(request)
+        result = await engine.backup.create(dest_dir=pathlib.Path(body.dest_dir) if body.dest_dir else None)
+        return result
+
+    @app.get("/api/v1/backups")
+    async def list_backups(request: Request) -> list[dict]:
+        await require_auth(request)
+        return [_backup_json(r) for r in await engine.backup.list_backups()]
+
+    @app.get("/api/v1/backups/{backup_id}")
+    async def get_backup(backup_id: str, request: Request) -> dict:
+        await require_auth(request)
+        row = await engine.backup.get_backup(backup_id)
+        if row is None:
+            raise ApiError("not_found", "sauvegarde inconnue", 404)
+        return _backup_json(row)
+
+    @app.post("/api/v1/backups/{backup_id}/verify")
+    async def verify_backup(backup_id: str, request: Request) -> dict:
+        await require_auth(request)
+        return await engine.backup.verify(backup_id)
+
     return app
 
 
@@ -453,3 +579,49 @@ def _event_json(event) -> dict:
 
 def _sse(event) -> str:
     return f"id: {event.id}\nevent: {event.type}\ndata: {json.dumps(_event_json(event), ensure_ascii=False)}\n\n"
+
+
+def _export_json(result: dict) -> dict:
+    return {
+        "export_id": result["export_id"],
+        "format": result["format"],
+        "encrypted": result["encrypted"],
+        "partial": result["partial"],
+        "counts": result["counts"],
+        "warnings": result["warnings"],
+        "files": result["files"],
+    }
+
+
+def _export_row_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"].isoformat(),
+        "format": row["format"],
+        "investigation_ids": _loads(row["investigation_ids"]),
+        "branch_ids": _loads(row["branch_ids"]),
+        "exclusions": _loads(row["exclusions"]),
+        "include_proofs": row["include_proofs"],
+        "encrypted": row["encrypted"],
+        "partial": row["partial"],
+        "manifest_sha256": row["manifest_sha256"],
+        "counts": _loads(row["counts"]),
+        "warnings": _loads(row["warnings"]),
+        "files": _loads(row["files"]),
+    }
+
+
+def _backup_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"].isoformat(),
+        "kind": row["kind"],
+        "dest_dir": row["dest_dir"],
+        "manifest_sha256": row["manifest_sha256"],
+        "db_dump_sha256": row["db_dump_sha256"],
+        "schema_version": row["schema_version"],
+        "proof_files_count": row["proof_files_count"],
+        "size_bytes": row["size_bytes"],
+        "verified_at": row["verified_at"].isoformat() if row["verified_at"] else None,
+        "verify_errors": _loads(row["verify_errors"]),
+    }

@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 
 from .ai import AIBroker, SimulatedAIAdapter
+from .backup import BackupService
 from .config import Settings
 from .connectors import ConnectorRegistry, SimulatedConnector
 from .events import EventBus
+from .exchange import ExchangeService
 from .graph import GraphService
 from .orchestrator import Orchestrator
 from .policies import BudgetManager, PolicyEngine
+from .report import ReportService
 from .scheduler import Scheduler
 from .store import create_pool, migrate
 from .store.files import FileStore
@@ -30,6 +33,9 @@ class Engine:
         self.broker: AIBroker
         self.filestore: FileStore
         self.graph: GraphService
+        self.report: ReportService
+        self.exchange: ExchangeService
+        self.backup: BackupService
         self.orchestrator: Orchestrator
         self.scheduler: Scheduler
         self.external_semaphore: asyncio.Semaphore
@@ -66,6 +72,9 @@ class Engine:
         self.registry.register(connector)
         self.policy.allow_target(connector.manifest.id)
         self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
+        self.report = ReportService(self.pool, self.repo, graph=self.graph)
+        self.exchange = ExchangeService(self.pool, self.repo, self.bus, self.filestore, self.settings.paths, report=self.report)
+        self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
         self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
 

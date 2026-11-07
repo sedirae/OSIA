@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
+import os
+import pathlib
 import sys
 
 from .config import Settings
@@ -119,6 +122,131 @@ async def _cmd_events(args) -> int:
     return 0
 
 
+def _passphrase(args) -> str | None:
+    """Phrase d'archive : jamais en argument de ligne de commande (historique shell)."""
+    return os.environ.get("OSIA_ARCHIVE_PASSPHRASE") or (getpass.getpass("Phrase secrète de l'archive : ") if getattr(args, "encrypt", False) or getattr(args, "need_pass", False) else None)
+
+
+async def _cmd_export(args) -> int:
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    passphrase = _passphrase(args)
+    result = await engine.exchange.export_investigation(
+        args.id,
+        format=args.format,
+        branch_ids=args.branch or None,
+        include_proofs=not args.no_proofs,
+        exclusions=set(args.exclude or []),
+        encrypt=args.encrypt,
+        passphrase=passphrase,
+    )
+    out = pathlib.Path(args.out) if args.out else pathlib.Path(result["dir"])
+    out.mkdir(parents=True, exist_ok=True)
+    src_dir = pathlib.Path(result["dir"])
+    for f in result["files"]:
+        (out / f["file"]).write_bytes((src_dir / f["file"]).read_bytes())
+    print(json.dumps({"export_id": result["export_id"], "format": result["format"], "encrypted": result["encrypted"], "partial": result["partial"], "counts": result["counts"], "warnings": result["warnings"], "out": str(out)}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_import(args) -> int:
+    from .engine import Engine
+    from .exchange import ArchiveError, CryptoError, ImportConflictError
+
+    engine = Engine(_settings())
+    await engine.setup()
+    passphrase = os.environ.get("OSIA_ARCHIVE_PASSPHRASE")
+    path = pathlib.Path(args.file)
+    if args.preview:
+        try:
+            preview = await engine.exchange.preview_import(path, passphrase)
+        except (ArchiveError, CryptoError) as exc:
+            print(f"archive invalide: {exc}", file=sys.stderr)
+            await engine.pool.close()
+            return 1
+        print(json.dumps(preview, ensure_ascii=False, default=str))
+        await engine.pool.close()
+        return 0
+    try:
+        report = await engine.exchange.apply_import(
+            path, mode=args.mode, on_conflict=args.on_conflict, passphrase=passphrase
+        )
+    except ImportConflictError as exc:
+        print(json.dumps({"error": "import_conflict", "conflicts": exc.conflicts}, ensure_ascii=False), file=sys.stderr)
+        await engine.pool.close()
+        return 2
+    except (ArchiveError, CryptoError) as exc:
+        print(f"archive invalide: {exc}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    print(json.dumps({"applied": True, "mode": report["mode"], "inserted": report["inserted"], "normalized_states": report["normalized_states"], "warnings": report["warnings"]}, ensure_ascii=False, default=str))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_backup_create(args) -> int:
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    result = await engine.backup.create(dest_dir=pathlib.Path(args.dest) if args.dest else None)
+    print(json.dumps({"id": result["id"], "dest_dir": result["dest_dir"], "size_bytes": result["size_bytes"], "proof_files": result["manifest"]["counts"]["proof_files"]}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_backup_list(args) -> int:
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    for row in await engine.backup.list_backups():
+        print(f"{row['id']}\t{row['kind']}\t{row['created_at'].isoformat()}\t{row['dest_dir']}\t{row['size_bytes']}\tverifie={'oui' if row['verified_at'] else 'non'}")
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_backup_verify(args) -> int:
+    from .engine import Engine
+    from .backup import BackupError
+
+    engine = Engine(_settings())
+    await engine.setup()
+    try:
+        result = await engine.backup.verify(args.id)
+    except BackupError as exc:
+        print(str(exc), file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    print(json.dumps(result, ensure_ascii=False, default=str))
+    await engine.pool.close()
+    return 0 if result["verified"] else 1
+
+
+async def _cmd_backup_restore(args) -> int:
+    from .engine import Engine
+    from .backup import BackupError
+
+    engine = Engine(_settings())
+    await engine.setup()
+    if not args.yes:
+        print("restauration destructive : confirmez avec --yes (une sauvegarde prealable sera creee si la base est non vide)", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    try:
+        result = await engine.backup.restore(args.id, confirm=True, target_dsn=args.target_dsn)
+    except BackupError as exc:
+        print(str(exc), file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="osia", description="OSIA — moteur d'investigation OSINT")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -145,6 +273,37 @@ def main(argv: list[str] | None = None) -> int:
     stop = inv_sub.add_parser("stop", help="arrêter une investigation")
     stop.add_argument("id")
     stop.set_defaults(func=_cmd_investigation_stop)
+    export = inv_sub.add_parser("export", help="exporter une archive .osia et/ou un rapport HTML (D5, T7)")
+    export.add_argument("id")
+    export.add_argument("--format", choices=["osia", "html", "both"], default="osia")
+    export.add_argument("--out", help="répertoire de sortie (défaut : exports internes)")
+    export.add_argument("--branch", action="append", help="restreindre à une branche (répétable)")
+    export.add_argument("--no-proofs", action="store_true", help="exclure les binaires des preuves (T7.4)")
+    export.add_argument("--exclude", action="append", help="exclure une table technique (tasks, events, ledger, reservations, external_ops)")
+    export.add_argument("--encrypt", action="store_true", help="chiffrer l'archive (AES-256-GCM + Argon2id, CON-15)")
+    export.set_defaults(func=_cmd_export)
+
+    imp = sub.add_parser("import", help="prévisualiser ou appliquer l'import d'une archive .osia (T7.6)")
+    imp.add_argument("file")
+    imp.add_argument("--preview", action="store_true", help="prévisualiser sans modifier (conflits, périmètre)")
+    imp.add_argument("--mode", choices=["add", "merge"], default="add")
+    imp.add_argument("--on-conflict", choices=["fail", "skip"], default="fail")
+    imp.set_defaults(func=_cmd_import)
+
+    backup = sub.add_parser("backup", help="sauvegarde technique manuelle à chaud (T2.6, CON-16)")
+    backup_sub = backup.add_subparsers(dest="backup_command", required=True)
+    bcreate = backup_sub.add_parser("create", help="créer une sauvegarde cohérente à chaud")
+    bcreate.add_argument("--dest", help="répertoire destination (défaut : OSIA_BACKUP_DIR)")
+    bcreate.set_defaults(func=_cmd_backup_create)
+    backup_sub.add_parser("list", help="lister les sauvegardes").set_defaults(func=_cmd_backup_list)
+    bverify = backup_sub.add_parser("verify", help="vérifier l'intégrité d'une sauvegarde")
+    bverify.add_argument("id")
+    bverify.set_defaults(func=_cmd_backup_verify)
+    brestore = backup_sub.add_parser("restore", help="restaurer une sauvegarde (destructif, --yes requis)")
+    brestore.add_argument("id")
+    brestore.add_argument("--yes", action="store_true", help="confirmation explicite requise")
+    brestore.add_argument("--target-dsn", help="DSN cible (défaut : base courante)")
+    brestore.set_defaults(func=_cmd_backup_restore)
 
     op = sub.add_parser("op", help="gérer les opérations externes")
     op_sub = op.add_subparsers(dest="op_command", required=True)
