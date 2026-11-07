@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import os
 from html.parser import HTMLParser
-from typing import Any, Optional
+from typing import Any
 
 from .base import ConnectorManifest, FetchRequest, FetchResult, TrustLevel
-from .http import HttpConnector
+from .http import HttpConnector, build_url
 
 
 class _TextExtractor(HTMLParser):
@@ -48,6 +48,18 @@ def extract_text_from_pdf(data: bytes) -> str:
     return "\n".join((page.extract_text() or "") for page in reader.pages)
 
 
+def _gleif_record(rec: Any) -> dict:
+    """Normalise un enregistrement LEI en tolérant les champs absents ou null (B7 §9.1 :
+    une réponse mal formée doit produire un problème de structure, pas un crash)."""
+    rec = rec if isinstance(rec, dict) else {}
+    entity = ((rec.get("attributes") or {}).get("entity")) or {}
+    return {
+        "lei": rec.get("id"),
+        "legal_name": (entity.get("legalName") or {}).get("value"),
+        "country": (entity.get("legalAddress") or {}).get("country"),
+    }
+
+
 class RechercheEntreprisesConnector(HttpConnector):
     """API Recherche d'Entreprises (DINUM/api.gouv.fr) — V1.2, gratuite, sans jeton.
 
@@ -79,26 +91,30 @@ class RechercheEntreprisesConnector(HttpConnector):
         self.base_url = os.environ.get("OSIA_RECHERCHE_ENTREPRISES_API_BASE", "https://recherche-entreprises.api.gouv.fr/search")
 
     async def fetch(self, request: FetchRequest) -> FetchResult:
-        url = self.base_url
-        status, _, body = await self._get(url, params={"q": request.query, "per_page": 5})
+        params = {"q": request.query, "per_page": 5}
+        url = build_url(self.base_url, params)
+        status, _, body = await self._get(self.base_url, params=params)
         payload = json.loads(body.decode("utf-8"))
-        results = payload.get("results", [])
+        results = payload.get("results") or []
+        total = payload.get("total_results")
+        if total is None:
+            total = len(results)
         normalized = {
             "query": request.query,
-            "total_results": payload.get("total_results", len(results)),
+            "total_results": total,
             "results": [
                 {
-                    "siren": r.get("siren"),
-                    "nom_complet": r.get("nom_complet"),
-                    "etat_administratif": r.get("etat_administratif"),
-                    "nature_juridique": r.get("nature_juridique"),
-                    "activite_principale": r.get("activite_principale"),
-                    "adresse": (r.get("siege") or {}).get("adresse"),
+                    "siren": (r or {}).get("siren"),
+                    "nom_complet": (r or {}).get("nom_complet"),
+                    "etat_administratif": (r or {}).get("etat_administratif"),
+                    "nature_juridique": (r or {}).get("nature_juridique"),
+                    "activite_principale": (r or {}).get("activite_principale"),
+                    "adresse": ((r or {}).get("siege") or {}).get("adresse"),
                 }
                 for r in results
             ],
         }
-        return self._result(query=request.query, url=url + "?q=" + request.query, status=status, payload=normalized)
+        return self._result(query=request.query, url=url, status=status, payload=normalized)
 
     def validate_response(self, payload: Any) -> list[str]:
         """Contrôle sémantique de la réponse NORMALISÉE (B7 §9.1)."""
@@ -141,16 +157,21 @@ class BodaccConnector(HttpConnector):
         self.base_url = os.environ.get("OSIA_BODACC_API_BASE", "https://bodacc.datagouv.fr/api/v1/annonces")
 
     async def fetch(self, request: FetchRequest) -> FetchResult:
-        url = self.base_url
-        status, _, body = await self._get(url, params={"q": request.query, "limit": 5})
+        params = {"q": request.query, "limit": 5}
+        url = build_url(self.base_url, params)
+        status, _, body = await self._get(self.base_url, params=params)
         payload = json.loads(body.decode("utf-8"))
-        results = payload.get("results", payload.get("data", []))
-        normalized = {
-            "query": request.query,
-            "total": payload.get("total", payload.get("meta", {}).get("pagination", {}).get("total", len(results))),
-            "results": results,
-        }
-        return self._result(query=request.query, url=url + "?q=" + request.query, status=status, payload=normalized)
+        raw = payload.get("results")
+        if raw is None:
+            raw = payload.get("data")
+        results = raw or []
+        total = payload.get("total")
+        if total is None:
+            total = ((payload.get("meta") or {}).get("pagination") or {}).get("total")
+        if total is None:
+            total = len(results)
+        normalized = {"query": request.query, "total": total, "results": results}
+        return self._result(query=request.query, url=url, status=status, payload=normalized)
 
     def validate_response(self, payload: Any) -> list[str]:
         if not isinstance(payload, dict) or "results" not in payload:
@@ -194,20 +215,14 @@ class GleifConnector(HttpConnector):
             params = {"filter[lei]": q}
         else:
             params = {"filter[entity.legalName]": q}
-        url = self.base_url
-        status, _, body = await self._get(url, params={**params, "page[size]": 5})
+        params["page[size]"] = 5
+        url = build_url(self.base_url, params)
+        status, _, body = await self._get(self.base_url, params=params)
         payload = json.loads(body.decode("utf-8"))
-        data = payload.get("data", [])
+        data = payload.get("data") or []
         normalized = {
             "query": q,
-            "results": [
-                {
-                    "lei": rec.get("id"),
-                    "legal_name": ((rec.get("attributes") or {}).get("entity") or {}).get("legalName", {}).get("value"),
-                    "country": ((rec.get("attributes") or {}).get("entity") or {}).get("legalAddress", {}).get("country"),
-                }
-                for rec in data
-            ],
+            "results": [_gleif_record(rec) for rec in data],
         }
         return self._result(query=q, url=url, status=status, payload=normalized)
 
