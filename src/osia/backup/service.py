@@ -230,24 +230,35 @@ class BackupService:
             env["PGPASSWORD"] = parts["password"]
         base_args = ["-h", parts["host"], "-p", parts["port"], "-U", parts["user"]]
         dump_path = dest / manifest["db_dump"]["file"]
-        if manifest["db_dump"]["format"] == "custom":
-            subprocess.run(
-                [_pg_bin("pg_restore"), *base_args, "--clean", "--if-exists", "-d", parts["dbname"], str(dump_path)],
-                check=True, env=env, capture_output=True,
-            )
-        else:
-            subprocess.run(
-                [_pg_bin("psql"), *base_args, "-d", parts["dbname"], "-v", "ON_ERROR_STOP=1", "-f", str(dump_path)],
-                check=True, env=env, capture_output=True,
-            )
-        proofs_src = dest / "proofs"
-        proofs_dst = self.paths.proofs_dir / "sha256"
-        if proofs_dst.exists():
-            shutil.rmtree(proofs_dst)
-        if proofs_src.exists():
-            shutil.copytree(proofs_src, proofs_dst)
+        try:
+            if manifest["db_dump"]["format"] == "custom":
+                subprocess.run(
+                    [_pg_bin("pg_restore"), *base_args, "--clean", "--if-exists", "-d", parts["dbname"], str(dump_path)],
+                    check=True, env=env, capture_output=True,
+                )
+            else:
+                subprocess.run(
+                    [_pg_bin("psql"), *base_args, "-d", parts["dbname"], "-v", "ON_ERROR_STOP=1", "-f", str(dump_path)],
+                    check=True, env=env, capture_output=True,
+                )
+            proofs_src = dest / "proofs"
+            proofs_dst = self.paths.proofs_dir / "sha256"
+            if proofs_dst.exists():
+                shutil.rmtree(proofs_dst)
+            if proofs_src.exists():
+                shutil.copytree(proofs_src, proofs_dst)
+        except BaseException:
+            # La sauvegarde prealable existe sur disque : la journaliser au mieux pour
+            # ne pas laisser une sauvegarde orpheline si la restauration echoue.
+            if pre_restore_journal is not None:
+                try:
+                    await self._journal(pre_restore_journal)
+                except Exception:
+                    pass
+            raise
         if pre_restore_journal is not None:
             await self._journal(pre_restore_journal)
+            await self.bus.emit(type="backup.created", payload={"backup_id": pre_restore_journal["id"], "dest_dir": pre_restore_journal["dest_dir"], "kind": "pre_restore", "proof_files": pre_restore_journal["proof_files_count"]})
         await self.bus.emit(type="backup.restored", payload={"backup_id": backup_id, "pre_restore": pre_restore["id"] if pre_restore else None})
         return {"backup_id": backup_id, "restored": True, "pre_restore_backup_id": pre_restore["id"] if pre_restore else None}
 

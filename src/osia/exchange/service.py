@@ -120,7 +120,8 @@ class ExchangeService:
             html = await self.report.build(
                 investigation_id,
                 branch_ids=branch_ids,
-                exclusions=exclusions | ({"proofs"} if not include_proofs else set()),
+                exclusions=exclusions,
+                include_proofs_meta=include_proofs,
             ) if self.report is not None else None
             if html is not None:
                 dest = out_dir / "rapport.html"

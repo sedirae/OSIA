@@ -116,6 +116,11 @@ JSONB_COLS = {
     "events": {"payload"},
 }
 
+# Colonnes de type date (ni timestamp ni jsonb) : iso str -> datetime.date a l'import.
+DATE_COLS = {
+    "relations": {"valid_from", "valid_to"},
+}
+
 
 def jsonable(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
@@ -186,7 +191,7 @@ async def dump_investigation(
                     "SELECT * FROM branches WHERE investigation_id = $1 AND id = ANY($2) ORDER BY depth, created_at",
                     investigation_id, ids,
                 )
-            elif branch_ids and table in ("tasks", "assertions", "relations", "events"):
+            elif branch_ids and table in ("tasks", "assertions", "relations", "events", "reservations"):
                 rows = await conn.fetch(
                     f"SELECT * FROM {table} WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2)) "
                     "ORDER BY created_at",
@@ -306,15 +311,25 @@ async def import_payload(
                     for col, ref_table in refs.items():
                         if new_row.get(col) is not None:
                             if col in deferred:
-                                mapped = id_map[ref_table][new_row[col]] if mode == "add" and not TABLES[ref_table].get("serial") else new_row[col]
+                                mapped = new_row[col]
+                                if mode == "add" and not TABLES[ref_table].get("serial"):
+                                    mapped = id_map[ref_table].get(new_row[col])
+                                    if mapped is None:
+                                        report.setdefault("dangling_refs", []).append({"table": table, "id": new_row.get(pk), "column": col, "missing": new_row[col], "ref_table": ref_table})
                                 pending_deferred.append((col, mapped))
                                 new_row[col] = None
                             elif mode == "add" and not TABLES[ref_table].get("serial"):
-                                new_row[col] = id_map[ref_table][new_row[col]]
+                                mapped = id_map[ref_table].get(new_row[col])
+                                if mapped is None:
+                                    report.setdefault("dangling_refs", []).append({"table": table, "id": new_row.get(pk), "column": col, "missing": new_row[col], "ref_table": ref_table})
+                                new_row[col] = mapped
                     if table == "decisions" and new_row.get("target_id") is not None:
                         rt = target_ref.get(new_row.get("target_type"))
                         if rt and mode == "add":
-                            new_row["target_id"] = id_map[rt].get(new_row["target_id"], new_row["target_id"])
+                            mapped = id_map[rt].get(new_row["target_id"])
+                            if mapped is None:
+                                report.setdefault("dangling_refs", []).append({"table": table, "id": new_row.get(pk), "column": "target_id", "missing": new_row["target_id"], "ref_table": rt})
+                            new_row["target_id"] = mapped
                     if table == "investigations" and new_row.get("state") == "running":
                         new_row["state"] = "suspended"
                         report["normalized_states"].append(new_row[pk])
@@ -333,6 +348,8 @@ async def import_payload(
                         v = new_row.get(c)
                         if c in JSONB_COLS.get(table, set()):
                             values.append(_json(v))
+                        elif isinstance(v, str) and c in DATE_COLS.get(table, set()) and v:
+                            values.append(date.fromisoformat(v))
                         elif isinstance(v, str) and c.endswith(("_at", "_before", "ed_at")) and v and not isinstance(v, (datetime, date)):
                             values.append(_parse_dt(v))
                         else:

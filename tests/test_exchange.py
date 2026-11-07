@@ -202,3 +202,50 @@ async def test_add_mode_ignores_same_id_divergences(engine, tmp_path):
     report = await engine.exchange.apply_import(dest, mode="add", on_conflict="fail")
     assert report["inserted"]["assertions"] == 1
     assert report["remapped"] > 0
+
+
+async def test_import_roundtrip_with_relation_dates(engine, tmp_path):
+    """Regression audit PR#6 : les colonnes date (valid_from/valid_to) doivent
+    recharger sans DataError asyncpg (str vs date)."""
+    import pathlib as _p
+
+    inv = await make_investigation(engine)
+    proof, a, b, rel, ass = await _seed(engine, inv["id"])
+    async with engine.pool.acquire() as conn:
+        await conn.execute("UPDATE relations SET valid_from = '2024-01-01', valid_to = '2025-06-30' WHERE id = $1", rel["id"])
+    result = await engine.exchange.export_investigation(inv["id"], format="osia")
+    src = _p.Path(result["dir"]) / "archive.osia"
+    report = await engine.exchange.apply_import(src, mode="add")
+    assert report["remapped"] > 0
+    invs = await engine.repo.list_investigations()
+    imported = [i for i in invs if i["id"] != inv["id"]][0]
+    async with engine.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT r.valid_from, r.valid_to FROM relations r JOIN entities e ON e.id = r.src_id WHERE e.investigation_id = $1",
+            imported["id"],
+        )
+    assert row is not None
+    assert str(row["valid_from"]) == "2024-01-01"
+    assert str(row["valid_to"]) == "2025-06-30"
+
+
+async def test_import_partial_archive_dangling_refs(engine, tmp_path):
+    """Regression audit PR#6 : un export partiel (tables exclues) doit s'importer
+    proprement en mode add, references perdues mises a NULL et signalees, sans KeyError."""
+    inv = await make_investigation(engine)
+    proof, a, b, rel, ass = await _seed(engine, inv["id"])
+    result = await engine.exchange.export_investigation(inv["id"], format="osia", exclusions={"external_ops", "tasks"})
+    src = pathlib.Path(result["dir"]) / "archive.osia"
+    report = await engine.exchange.apply_import(src, mode="add")
+    assert report["inserted"]["entities"] == 2
+    invs = await engine.repo.list_investigations()
+    imported = [i for i in invs if i["id"] != inv["id"]][0]
+    refs = await engine.repo.list_proof_refs(imported["id"])
+    assert len(refs) == 1
+    async with engine.pool.acquire() as conn:
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM reservations WHERE investigation_id = $1 AND op_id IS NOT NULL", imported["id"]
+        )
+    assert n == 0
+    for d in report.get("dangling_refs", []):
+        assert d["ref_table"] in ("external_ops", "tasks") and d["table"] in ("reservations", "external_ops")
