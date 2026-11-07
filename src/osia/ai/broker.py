@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Optional, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -29,6 +30,7 @@ class AIBroker:
         role_models: dict[str, str],
         allowed_fallbacks: Optional[dict[str, str]] = None,
         semaphore: Optional[asyncio.Semaphore] = None,
+        techlog: Optional[Any] = None,
     ):
         self.engine = engine
         self.bus = bus
@@ -36,6 +38,7 @@ class AIBroker:
         self.role_models = role_models
         self.allowed_fallbacks = allowed_fallbacks or {}
         self.semaphore = semaphore
+        self.techlog = techlog  # CON-18 / T3.13 : journal technique structuré (durées, consommations)
 
     def _target(self, adapter: AIAdapter) -> str:
         return f"{adapter.provider}:{adapter.model}"
@@ -103,6 +106,7 @@ class AIBroker:
             payload={"op_id": op_id, "kind": "ai_call", "target": target, "reservation_id": decision.reservation_id},
         )
         await self.engine.mark_in_flight(op_id)
+        started = time.monotonic()
         try:
             if self.semaphore is not None:
                 async with self.semaphore:
@@ -123,6 +127,8 @@ class AIBroker:
                 branch_id=branch_id,
                 payload={"op_id": op_id, "error": "sortie IA non conforme au schéma (T8.6)"},
             )
+            if self.techlog is not None:
+                self.techlog.log("ai.broker", "ai.call", level="error", investigation_id=investigation_id, branch_id=branch_id, op_id=op_id, duration_ms=int((time.monotonic() - started) * 1000), error="sortie_ia_invalide", detail={"target": target, "role": role})
             raise PolicyDeny("sortie_ia_invalide", "ai")
         except Exception as exc:
             await self.engine.mark_uncertain(op_id)
@@ -132,9 +138,13 @@ class AIBroker:
                 branch_id=branch_id,
                 payload={"op_id": op_id, "error": str(exc)},
             )
+            if self.techlog is not None:
+                self.techlog.log("ai.broker", "ai.call", level="error", investigation_id=investigation_id, branch_id=branch_id, op_id=op_id, duration_ms=int((time.monotonic() - started) * 1000), error=str(exc), detail={"target": target, "role": role})
             raise
         actual = adapter.cost_per_call_cents if adapter.paid else None
         await self.engine.complete_op(op_id, {"role": role, "output": output.model_dump(mode="json")}, actual_cents=actual)
+        if self.techlog is not None:
+            self.techlog.log("ai.broker", "ai.call", investigation_id=investigation_id, branch_id=branch_id, op_id=op_id, duration_ms=int((time.monotonic() - started) * 1000), detail={"target": target, "role": role, "paid": adapter.paid, "cost_cents": actual})
         await self.bus.emit(
             type="op.completed",
             investigation_id=investigation_id,

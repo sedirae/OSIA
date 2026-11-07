@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -93,6 +94,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     if not decision.allowed:
         raise PolicyDeny(decision.reason or "refus_politique", "source")
     await engine.policy.mark_in_flight(decision.op_id)
+    started = time.monotonic()
     try:
         async with engine.external_semaphore:
             result = await asyncio.wait_for(
@@ -107,6 +109,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
             branch_id=task["branch_id"],
             payload={"op_id": decision.op_id, "error": f"timeout_source:{decision.timeout_seconds}s"},
         )
+        engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error=f"timeout_source:{decision.timeout_seconds}s", detail={"connector_id": connector.manifest.id})
         raise RuntimeError(f"timeout_source:{decision.timeout_seconds}s") from exc
     except Exception as exc:
         await engine.policy.mark_uncertain(decision.op_id)
@@ -116,6 +119,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
             branch_id=task["branch_id"],
             payload={"op_id": decision.op_id, "error": str(exc)},
         )
+        engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error=str(exc), detail={"connector_id": connector.manifest.id})
         raise
     proof = await engine.filestore.store_proof(
         investigation_id=inv["id"],
@@ -138,6 +142,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         ttl_hours,
     )
     await engine.policy.complete_op(decision.op_id, {"http_status": result.provenance.http_status})
+    engine.techlog.log("tasks", "source.query", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), detail={"connector_id": connector.manifest.id, "http_status": result.provenance.http_status})
     await engine.bus.emit(
         type="discovery",
         investigation_id=inv["id"],

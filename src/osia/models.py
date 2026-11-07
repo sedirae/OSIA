@@ -163,6 +163,7 @@ EDITABLE_SETTINGS: dict[str, type] = {
     "timezone": str,
     "source_cache_ttl_hours": int,
     "audit_retention_days": int,
+    "tech_log_retention_days": int,
     "session_ttl_hours": int,
 }
 
@@ -170,6 +171,7 @@ SETTING_BOUNDS: dict[str, tuple[int, Optional[int]]] = {
     "global_monthly_cap_cents": (0, None),
     "source_cache_ttl_hours": (1, None),
     "audit_retention_days": (1, None),
+    "tech_log_retention_days": (1, None),
     "session_ttl_hours": (1, None),
 }
 
@@ -210,6 +212,21 @@ class ProfileCreateRequest(BaseModel):
     name: str = Field(min_length=1)
     limits: dict[str, Any]
     is_default: bool = False
+
+
+class LogPurgeRequest(BaseModel):
+    """CON-18 / D4 : purge manuelle supervisée d'un journal à finalité distincte.
+    `dry_run` = prévisualisation des gains sans rien supprimer. L'historique métier (base)
+    n'est jamais purgé (D4 §6.1.A/§6.5)."""
+
+    kind: Literal["tech", "audit"]
+    dry_run: bool = True
+
+
+class CachePurgeRequest(BaseModel):
+    """CON-18 / D4 §6.1.B : purge du cache technique avec prévisualisation des gains (dry_run)."""
+
+    dry_run: bool = True
 
 
 class ApiError(Exception):

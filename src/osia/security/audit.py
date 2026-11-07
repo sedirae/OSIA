@@ -4,6 +4,7 @@ import datetime as _dt
 import json
 import os
 import pathlib
+import re
 import time
 from typing import Any, Optional
 
@@ -20,14 +21,24 @@ _SENSITIVE_KEYS = {
     "api_key",
 }
 
+# Dans une chaîne libre (message d'erreur, détail), masque aussi les motifs "clé=valeur" ou
+# "clé: valeur" pour les clés sensibles (ex. "échec token=abcdef" -> "échec token=***").
+_SENSITIVE_INLINE = re.compile(
+    r"\b(" + "|".join(sorted(_SENSITIVE_KEYS, key=len, reverse=True)) + r")\b(\s*[=:]\s*)(\S+)",
+    re.IGNORECASE,
+)
+
 
 def _scrub(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: ("***" if k.lower() in _SENSITIVE_KEYS else _scrub(v)) for k, v in value.items()}
     if isinstance(value, list):
         return [_scrub(v) for v in value]
-    if isinstance(value, str) and len(value) > 256:
-        return value[:256] + "…"
+    if isinstance(value, str):
+        masked = _SENSITIVE_INLINE.sub(lambda m: m.group(1) + m.group(2) + "***", value)
+        if len(masked) > 256:
+            return masked[:256] + "…"
+        return masked
     return value
 
 
@@ -70,14 +81,38 @@ class SecurityAudit:
             os.fsync(handle.fileno())
         self._purge()
 
-    def _purge(self) -> None:
-        if self.retention_days <= 0:
-            return
-        cutoff = time.time() - self.retention_days * 86400
+    def _cutoff(self) -> float:
+        return time.time() - self.retention_days * 86400
+
+    def _entries(self) -> list[str]:
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            return self.path.read_text(encoding="utf-8").splitlines()
         except FileNotFoundError:
-            return
+            return []
+
+    def expired_count(self) -> int:
+        """CON-18 : prévisualisation (dry-run) du nombre d'entrées hors rétention."""
+        if self.retention_days <= 0:
+            return 0
+        cutoff = self._cutoff()
+        count = 0
+        for line in self._entries():
+            try:
+                ts = json.loads(line)["ts"]
+                t = _dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc).timestamp()
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+            if t < cutoff:
+                count += 1
+        return count
+
+    def purge(self) -> int:
+        """CON-18 : purge manuelle supervisée — supprime les entrées hors rétention.
+        Retourne le nombre d'entrées supprimées (0 = rien à purger, pas de réécriture)."""
+        if self.retention_days <= 0:
+            return 0
+        cutoff = self._cutoff()
+        lines = self._entries()
         kept: list[str] = []
         for line in lines:
             try:
@@ -87,8 +122,9 @@ class SecurityAudit:
                 continue
             if t >= cutoff:
                 kept.append(line)
-        if len(kept) == len(lines):
-            return  # rien à purger : pas de réécriture du journal
+        removed = len(lines) - len(kept)
+        if removed == 0:
+            return 0
         tmp = self.path.with_suffix(".jsonl.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -96,6 +132,10 @@ class SecurityAudit:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, self.path)
+        return removed
+
+    def _purge(self) -> None:
+        self.purge()
 
     def read(self, limit: int = 100) -> list[dict]:
         if not self.path.exists():
