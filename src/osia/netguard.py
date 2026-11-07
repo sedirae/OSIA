@@ -101,15 +101,21 @@ class NetworkGuard:
         if not host:
             self._log_block("host_absent", "")
             raise NetworkDeny("host_absent")
-        # IP littérale : filtrage direct (anti-SSRF)
+        try:
+            parsed.port
+        except ValueError:
+            self._log_block("port_invalide", host)
+            raise NetworkDeny("port_invalide", host)
+        # IP littérale : filtrage direct anti-SSRF contre les réseaux bloqués…
         try:
             ip = ipaddress.ip_address(host)
             if self.policy.ip_blocked(ip):
                 self._log_block("ip_interne_bloquee", host)
                 raise NetworkDeny("ip_interne_bloquee", host)
-            return host
         except ValueError:
             pass
+        # …puis allowlist/denylist appliquée aussi aux IP littérales :
+        # sans cela, une IP publique littérale contournerait l'allowlist de domaines.
         if not self.policy.domain_allowed(host):
             self._log_block("domaine_non_autorise", host)
             raise NetworkDeny("domaine_non_autorise", host)

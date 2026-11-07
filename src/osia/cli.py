@@ -369,22 +369,21 @@ async def _cmd_connectors_list(args) -> int:
 
 async def _cmd_connector_toggle(args) -> int:
     """CON-06 / T5.1 : --confirm exigé pour activer un connecteur EXPERIMENTAL."""
-    from .connectors.base import TrustLevel
     from .engine import Engine
 
     engine = Engine(_settings())
     await engine.setup()
-    connector = engine.registry._connectors.get(args.id)
-    if connector is None:
+    entry = next((c for c in engine.registry.list() if c["id"] == args.id), None)
+    if entry is None:
         print(f"connecteur inconnu : {args.id}", file=sys.stderr)
         await engine.pool.close()
         return 1
-    if args.enable and connector.manifest.trust_level == TrustLevel.EXPERIMENTAL and not args.confirm:
+    if args.enable and entry["trust_level"] == "experimental" and not args.confirm:
         print("connecteur expérimental : --confirm exigé (T5.1)", file=sys.stderr)
         await engine.pool.close()
         return 1
     engine.registry.set_enabled(args.id, args.enable)
-    await engine.repo.set_setting(f"allow_experimental:{args.id}", bool(args.enable and connector.manifest.trust_level == TrustLevel.EXPERIMENTAL))
+    await engine.repo.set_setting(f"allow_experimental:{args.id}", bool(args.enable and entry["trust_level"] == "experimental"))
     if args.enable:
         engine.policy.allow_target(args.id)
     engine.audit.log("op.connector.toggle", "success", detail={"connector_id": args.id, "enabled": args.enable})

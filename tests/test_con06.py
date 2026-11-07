@@ -43,6 +43,25 @@ def test_check_url_scheme_et_domaine():
         g.check_url("http://10.0.0.5/")
 
 
+def test_check_url_ip_literale_publique_ne_contourne_pas_allowlist():
+    """Correctif d'audit : une IP littérale publique hors allowlist est refusée
+    (sinon l'allowlist de domaines serait contournée par simple IP littérale)."""
+    g = guard(allowed_domains={"example.test"})
+    with pytest.raises(NetworkDeny) as exc:
+        g.check_url("https://93.184.216.34/x")
+    assert exc.value.reason == "domaine_non_autorise"
+    # allowlist vide = tout domaine/IP publique non bloqué autorisé
+    g2 = guard()
+    assert g2.check_url("https://93.184.216.34/x") == "93.184.216.34"
+
+
+def test_check_url_port_invalide():
+    g = guard()
+    with pytest.raises(NetworkDeny) as exc:
+        g.check_url("https://example.test:99999/x")
+    assert exc.value.reason == "port_invalide"
+
+
 async def test_resolve_and_check_anti_ssrf():
     async def fake_resolver_private(host, port):
         return [(2, 1, 6, "", ("192.168.1.10", port))]
@@ -126,6 +145,37 @@ def test_secret_store_sans_persistance(tmp_path):
     store.set("k", "v")
     assert not (tmp_path / "secrets.enc").exists()
     assert SecretStore(tmp_path, persist=False).get("k") is None
+
+
+def test_secret_store_passphrase_sel_aleatoire_et_rechargement(tmp_path):
+    """Correctif d'audit : profil CON-15 — sel Argon2id aléatoire par coffre (pas de sel fixe),
+    stocké dans le coffre ; rechargement avec la même passphrase fonctionne."""
+    d1, d2 = tmp_path / "a", tmp_path / "b"
+    SecretStore(d1, persist=True, passphrase="phrase-secrete").set("k", "v1")
+    SecretStore(d2, persist=True, passphrase="phrase-secrete").set("k", "v1")
+    b1 = json.loads((d1 / "secrets.enc").read_text())
+    b2 = json.loads((d2 / "secrets.enc").read_text())
+    assert b1["kdf"]["salt_b64"] != b2["kdf"]["salt_b64"]  # sels distincts
+    assert b1["ct"] != b2["ct"]
+    assert SecretStore(d1, persist=True, passphrase="phrase-secrete").get("k") == "v1"
+    # mauvaise passphrase : lecture vide, sans lever ni fuiter
+    assert SecretStore(d1, persist=True, passphrase="mauvaise").get("k") is None
+
+
+def test_secret_store_illisible_n_est_pas_ecrase(tmp_path):
+    """Correctif d'audit : un coffre illisible (corruption/mauvaise passphrase) n'est pas
+    silencieusement écrasé par un set() — pas de perte de secrets."""
+    store = SecretStore(tmp_path, persist=True)
+    store.set("k", "v")
+    enc = tmp_path / "secrets.enc"
+    original = enc.read_bytes()
+    enc.write_bytes(b"corrompu")
+    store2 = SecretStore(tmp_path, persist=True)
+    assert store2.get("k") is None
+    with pytest.raises(ValueError):
+        store2.set("k2", "v2")
+    assert enc.read_bytes() != original  # toujours le blob corrompu, pas un coffre écrasé
+    assert b"corrompu" in enc.read_bytes()
 
 
 # ---------- Isolation processus (T5.2) ----------

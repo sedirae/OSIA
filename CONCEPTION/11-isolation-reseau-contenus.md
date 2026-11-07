@@ -36,7 +36,7 @@
 
 ## 6. Vérifications réellement exécutées
 
-- `pytest -q` : **95 tests passés** (dont 11 nouveaux dans `tests/test_con06.py`), pgserver embarqué.
+- `pytest -q` : **99 tests passés** (dont 15 dans `tests/test_con06.py`, y compris les correctifs d'audit : IP littérale publique soumise à l'allowlist, port invalide refusé, sel Argon2id aléatoire par coffre, coffre illisible jamais écrasé), pgserver embarqué.
 - Couvert : check_url (schémas, allowlist/denylist, IP littérales internes bloquées incl. 169.254.169.254 et ::1) ; anti-SSRF par résolution DNS (resolver injecté) ; redirection vers l'interne bloquée ; redirection OK suivie ; taille plafonnée ; trop de redirections ; SecretStore mémoire + persistance chiffrée (0600, valeur absente du disque, rechargement) ; `run_isolated` OK et process tué au dépassement CPU ; connecteur experimental désactivé par défaut ; API net/secrets/connectors (toggle experimental sans confirm → 400) ; audit sans secrets ; `store_proof` rejette `file://`.
 
 ## 7. Limites
