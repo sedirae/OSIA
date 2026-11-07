@@ -1,6 +1,6 @@
 # OSIA — Référentiel de cadrage consolidé
 
-**Édition 1.1 — 6 novembre 2026.** Le cadrage fonctionnel, technique et le périmètre de livraison V1 sont validés. La conception détaillée reste à produire.
+**Édition 1.1 — 6 novembre 2026.** Le cadrage fonctionnel, technique et le périmètre de livraison V1 sont validés. La conception détaillée a été produite (CON-01…CON-19, `CONCEPTION/01`–`16`) et la recette applicative exécutée (`COWORKAI/RECETTE-APPLICATIVE.md`).
 
 OSIA est un moteur d'investigation sur sources publiques : il part d'indices et d'un objectif facultatif, conduit une recherche automatique bornée, conserve les preuves et restitue des conclusions vérifiables. L'utilisateur garde le contrôle des corrections, approfondissements, transmissions et budgets.
 
@@ -19,7 +19,9 @@ Ce dossier est le remplacement documentaire préparé à partir des cadrages pro
 | Critères d'acceptation, sans prétention de tests exécutés | [CADRAGE/RECETTE.md](CADRAGE/RECETTE.md) |
 | Écarts corrigés et limites de la vérification | [CADRAGE/AUDIT-COHERENCE.md](CADRAGE/AUDIT-COHERENCE.md) |
 | Périmètre V1 validé et reports | [CADRAGE/PERIMETRE-V1.md](CADRAGE/PERIMETRE-V1.md) |
-| Travail restant de conception | [CADRAGE/CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md) |
+| Travail restant de conception | [CADRAGE/CONCEPTION-RESTANTE.md](CADRAGE/CONCEPTION-RESTANTE.md) — couvert (CON-01…CON-19) |
+| Conception détaillée produite | `CONCEPTION/01`–`16` (index dans [CONCEPTION/README.md](CONCEPTION/README.md)) |
+| Recette applicative exécutée (matrice de traçabilité) | [COWORKAI/RECETTE-APPLICATIVE.md](COWORKAI/RECETTE-APPLICATIVE.md) |
 | Références exactes et empreintes des sources | [CADRAGE/SOURCES.md](CADRAGE/SOURCES.md) |
 | Intégration du cadrage sur GitHub | [COWORKAI/INTEGRATION-GITHUB.md](COWORKAI/INTEGRATION-GITHUB.md) |
 
