@@ -13,6 +13,7 @@ from .orchestrator import Orchestrator
 from .policies import BudgetManager, PolicyEngine
 from .report import ReportService
 from .scheduler import Scheduler
+from .security import SecurityAudit, SessionManager
 from .store import create_pool, migrate
 from .store.files import FileStore
 from .store.repo import Repo
@@ -38,6 +39,8 @@ class Engine:
         self.backup: BackupService
         self.orchestrator: Orchestrator
         self.scheduler: Scheduler
+        self.audit: SecurityAudit
+        self.sessions: SessionManager
         self.external_semaphore: asyncio.Semaphore
         self._runner: asyncio.Task | None = None
 
@@ -77,6 +80,8 @@ class Engine:
         self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
         self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
+        self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
+        self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
 
     async def start(self) -> dict:
         recovery = await self.scheduler.recover()

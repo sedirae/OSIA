@@ -93,6 +93,14 @@ class StopRequest(BaseModel):
     reason: StopReason = StopReason.USER
 
 
+class LoginRequest(BaseModel):
+    """Authentification administrateur en mode serveur (CON-05, T5.7).
+
+    Le jeton n'est jamais journalisé (T5.9) ; seul un hash est comparé."""
+
+    token: str
+
+
 class Event(BaseModel):
     id: int
     investigation_id: Optional[str]
