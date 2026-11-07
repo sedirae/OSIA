@@ -44,3 +44,21 @@ async def test_html_partial_warns(engine):
     await _seed(engine, inv["id"])
     html = await engine.report.build(inv["id"], exclusions={"events"})
     assert "Export partiel" in html
+
+
+async def test_html_embedded_js_renders_and_escapes(engine, tmp_path):
+    import shutil
+    import subprocess
+
+    inv = await make_investigation(engine)
+    await _seed(engine, inv["id"], name="<img src=x onerror=alert(1)>")
+    html = await engine.report.build(inv["id"])
+    out = tmp_path / "rapport.html"
+    out.write_text(html, encoding="utf-8")
+    if shutil.which("node") is None:
+        return
+    import pathlib
+    p = subprocess.run(["node", str(pathlib.Path(__file__).parent / "js_smoke.js"), str(out)], capture_output=True, text=True)
+    assert "SCRIPT OK" in p.stdout, p.stdout
+    assert "<img src=x onerror=" not in p.stdout
+    assert "&lt;img src=x onerror=alert(1)&gt;" in p.stdout

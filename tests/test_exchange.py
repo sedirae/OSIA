@@ -148,3 +148,57 @@ async def test_partial_export_warns_and_marks_partial(engine, tmp_path):
         names = zf.namelist()
         assert not any(n.startswith("proofs/") for n in names)
         assert "data/events.jsonl" in names or True
+
+
+async def test_merge_import_into_fresh_db_keeps_deferred_refs(engine, pg_server, tmp_path, monkeypatch):
+    import asyncpg
+    import secrets as pysecrets
+
+    inv = await make_investigation(engine)
+    _proof, _a, _b, _rel, _ass = await _seed(engine, inv["id"])
+    from osia.models import CreateBranchRequest
+
+    branch = (await engine.repo.list_branches(inv["id"]))[0]
+    await engine.orchestrator.create_branch(
+        inv["id"], CreateBranchRequest(objective="approfondir", parent_branch_id=branch["id"], explicit_acceptance=True)
+    )
+    result = await engine.exchange.export_investigation(inv["id"], format="osia")
+    dest = tmp_path / "archive.osia"
+    dest.write_bytes((pathlib.Path(result["dir"]) / "archive.osia").read_bytes())
+
+    dbname = f"osia_merge_{pysecrets.token_hex(4)}"
+    admin = await asyncpg.connect(pg_server.get_uri())
+    await admin.execute(f'CREATE DATABASE "{dbname}"')
+    await admin.close()
+    monkeypatch.setenv("OSIA_DB_DSN", pg_server.get_uri(database=dbname))
+    monkeypatch.setenv("OSIA_DATA_DIR", str(tmp_path / "data2"))
+    from osia.config import Settings
+    from osia.engine import Engine
+
+    eng2 = Engine(Settings.from_env())
+    await eng2.setup()
+    try:
+        report = await eng2.exchange.apply_import(dest, mode="merge", on_conflict="fail")
+        assert report["inserted"]["branches"] == 2
+        rows = await eng2.pool.fetch("SELECT id, parent_branch_id, depth FROM branches ORDER BY depth")
+        assert len(rows) == 2
+        assert rows[0]["parent_branch_id"] is None
+        assert rows[1]["parent_branch_id"] == rows[0]["id"], "la reference parent_branch_id a ete perdue a l'import merge"
+    finally:
+        await eng2.pool.close()
+        admin = await asyncpg.connect(pg_server.get_uri())
+        await admin.execute(f'DROP DATABASE IF EXISTS "{dbname}" WITH (FORCE)')
+        await admin.close()
+
+
+async def test_add_mode_ignores_same_id_divergences(engine, tmp_path):
+    inv = await make_investigation(engine)
+    _proof, _a, _b, _rel, _ass = await _seed(engine, inv["id"])
+    result = await engine.exchange.export_investigation(inv["id"], format="osia")
+    dest = tmp_path / "archive.osia"
+    dest.write_bytes((pathlib.Path(result["dir"]) / "archive.osia").read_bytes())
+    async with engine.pool.acquire() as conn:
+        await conn.execute("UPDATE assertions SET statement = 'MODIFIE' WHERE investigation_id = $1", inv["id"])
+    report = await engine.exchange.apply_import(dest, mode="add", on_conflict="fail")
+    assert report["inserted"]["assertions"] == 1
+    assert report["remapped"] > 0

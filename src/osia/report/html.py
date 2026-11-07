@@ -54,7 +54,7 @@ _JS = """
 const DATA = JSON.parse(document.getElementById('osia-data').textContent);
 const $ = (s, r=document) => r.querySelector(s);
 const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
-function esc(s){return String(s==null?'':s);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function tag(cls, txt){return '<span class="tag '+cls+'">'+esc(txt)+'</span>';}
 const SUPPORT_TAG = {documente:['confirmed','documenté'],corrobore:['confirmed','corroboré'],a_confirmer:['hypothesis','à confirmer'],contradictoire:['contradicted','contradictoire'],non_etabli:['hypothesis','non établi']};
 function supportTag(s){const t=SUPPORT_TAG[s]||['hypothesis',s];return tag(t[0],t[1]);}
@@ -90,8 +90,13 @@ function renderArbre(){
 
 let nodes=[], links=[], scale=1, panX=0, panY=0;
 function renderGraphe(){
-  const ents = DATA.entities||[], rels = DATA.relations||[];
-  const kinds = [...new Set(ents.map(e=>e.kind))];
+  const kindSel = $('#f-kind');
+  const kind = (kindSel && kindSel.value) || '';
+  const ents0 = DATA.entities||[], rels0 = DATA.relations||[];
+  const ents = kind ? ents0.filter(e=>e.kind===kind) : ents0;
+  const ids = new Set(ents.map(e=>e.id));
+  const rels = kind ? rels0.filter(r=>ids.has(r.src_id)&&ids.has(r.dst_id)) : rels0;
+  const kinds = [...new Set(ents0.map(e=>e.kind))];
   const R = 260, cx = 400, cy = 300;
   const pos = {};
   ents.forEach((e,i)=>{const k = kinds.indexOf(e.kind);const n = ents.filter(x=>x.kind===e.kind).length;const idx = ents.filter(x=>x.kind===e.kind).indexOf(e);const a = (2*Math.PI*idx/Math.max(n,1)) + k*0.7;pos[e.id]={x:cx+R*Math.cos(a),y:cy+R*Math.sin(a),e};});
@@ -101,13 +106,6 @@ function renderGraphe(){
   rels.forEach(r=>{const a=pos[r.src_id],b=pos[r.dst_id];if(a&&b)line(a.x,a.y,b.x,b.y,r.status==='contradicted'?'contradicted':r.status==='confirmed'?'confirmed':'hypothesis',r.status==='contradicted'?r.type:'');});
   ents.forEach(e=>{const p=pos[e.id];if(!p)return;const g=document.createElementNS(NS,'g');g.setAttribute('transform','translate('+p.x+','+p.y+')');g.style.cursor='pointer';const c=document.createElementNS(NS,'circle');c.setAttribute('r',14);c.setAttribute('fill',e.merged_into?'#c9d4e8':'#2458C6');svg.appendChild(g);g.appendChild(c);const t=document.createElementNS(NS,'text');t.setAttribute('y',26);t.setAttribute('text-anchor','middle');t.setAttribute('font-size','10');t.setAttribute('fill','#172033');t.textContent=(e.data&&(e.data.nom||e.data.name||e.data.label))||e.kind;g.appendChild(t);g.addEventListener('click',()=>showEntity(e.id));});
   nodes = ents; window._pos = pos;
-}
-function applyGraphFilter(){
-  const kind = $('#f-kind').value, sup = $('#f-support').value;
-  $$('#graph g').forEach(g=>{g.style.display='';});
-  const ents = DATA.entities||[];
-  ents.forEach(e=>{if(kind && e.kind!==kind){} });
-  renderGraphe();
 }
 function showEntity(id){
   const e = (DATA.entities||[]).find(x=>x.id===id);if(!e)return;
@@ -124,7 +122,8 @@ function showEntity(id){
   $$('.panel').forEach(p => p.classList.toggle('active', p.id==='panel-entites'));
 }
 function renderEntites(){
-  const q = ($('#q-entites').value||'').toLowerCase();
+  const prev = $('#q-entites');
+  const q = ((prev&&prev.value)||'').toLowerCase();
   const rows = (DATA.entities||[]).filter(e=>!q || JSON.stringify(e).toLowerCase().includes(q));
   $('#panel-entites').innerHTML = '<div class="toolbar"><input id="q-entites" placeholder="Rechercher une entité…" value="'+esc($('#q-entites')?$('#q-entites').value:'')+'" aria-label="Rechercher une entité"></div>'+
    rows.map(e=>'<div class="card"><h3><a href="#" data-ent="'+esc(e.id)+'">'+esc((e.data&&(e.data.nom||e.data.name||e.data.label))||e.id)+'</a> <span class="muted">'+esc(e.kind)+'</span></h3><div class="muted">'+esc(JSON.stringify(e.data)).slice(0,300)+'</div></div>').join('');
@@ -132,7 +131,8 @@ function renderEntites(){
   const qi = $('#q-entites'); if(qi) qi.addEventListener('input', renderEntites);
 }
 function renderAssertions(){
-  const q = ($('#q-assert').value||'').toLowerCase();
+  const prevA = $('#q-assert');
+  const q = ((prevA&&prevA.value)||'').toLowerCase();
   const rows = (DATA.assertions||[]).filter(a=>!q || a.statement.toLowerCase().includes(q));
   $('#panel-assertions').innerHTML = '<div class="toolbar"><input id="q-assert" placeholder="Rechercher une assertion…" value="" aria-label="Rechercher une assertion"></div>'+
    rows.map(a=>'<div class="card"><h3>'+esc(a.statement)+'</h3><div>'+supportTag(a.support_level)+' '+decTag(a.human_decision)+' <span class="tag">'+esc(a.nature)+'</span>'+(a.decisive?' <span class="tag confirmed">décisive</span>':'')+(a.contradicted_by&&a.contradicted_by.length?' <span class="tag contradicted">contradictions: '+esc(a.contradicted_by.join(', '))+'</span>':'')+'</div><div class="muted">preuves: '+esc((a.proof_ids||[]).join(', ')||'—')+' — branche '+esc(a.branch_id||'—')+'</div></div>').join('');
@@ -150,7 +150,7 @@ function renderDecisions(){
 }
 function renderSources(){
   const rows = DATA.proofs||[];
-  $('#panel-sources').innerHTML = '<div class="card"><p class="muted">Les contenus binaires des preuves ne sont pas embarqués dans ce rapport (lecture seule, aucun contenu actif des sources). Les originaux figurent dans l\'archive .osia.</p><table><tr><th>Date</th><th>Source</th><th>Type</th><th>SHA-256</th><th>Taille</th></tr>'+
+  $('#panel-sources').innerHTML = '<div class="card"><p class="muted">Les contenus binaires des preuves ne sont pas embarqués dans ce rapport (lecture seule, aucun contenu actif des sources). Les originaux figurent dans l&#39;archive .osia.</p><table><tr><th>Date</th><th>Source</th><th>Type</th><th>SHA-256</th><th>Taille</th></tr>'+
    rows.map(p=>'<tr><td>'+esc(p.fetched_at)+'</td><td>'+esc(p.source_url||'—')+'</td><td>'+esc(p.media_type||'—')+'</td><td><code>'+esc(p.proof_sha256)+'</code></td><td>'+esc(p.size_bytes)+'</td></tr>').join('')+'</table></div>';
 }
 function renderGraphToolbar(){
@@ -165,7 +165,7 @@ gwrap.addEventListener('mousedown',e=>{dragging=true;sx=e.clientX;sy=e.clientY;}
 window.addEventListener('mousemove',e=>{if(!dragging)return;const r=gwrap.getBoundingClientRect();panX-= (e.clientX-sx)* (800/scale)/r.width;panY-=(e.clientY-sy)*(600/scale)/r.height;sx=e.clientX;sy=e.clientY;setView();});
 window.addEventListener('mouseup',()=>{dragging=false;});
 gwrap.addEventListener('wheel',e=>{e.preventDefault();scale=Math.min(8,Math.max(0.25,scale*(e.deltaY<0?1.1:0.9)));setView();},{passive:false});
-$('#f-kind').addEventListener('change',()=>{});
+$('#f-kind').addEventListener('change', renderGraphe);
 setView();
 """
 

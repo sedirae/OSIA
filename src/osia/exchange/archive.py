@@ -135,29 +135,46 @@ def _read_zip(src: pathlib.Path | bytes | io.BufferedIOBase) -> zipfile.ZipFile:
         raise ArchiveError("fichier non reconnu comme archive ZIP (.osia attendu)") from exc
 
 
+def _load_json(raw: bytes, what: str) -> dict:
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ArchiveError(f"contenu illisible ({what})") from exc
+    if not isinstance(obj, dict):
+        raise ArchiveError(f"contenu invalide ({what})")
+    return obj
+
+
 def read_meta_and_manifest(src, passphrase: Optional[str] = None) -> tuple[dict, dict, zipfile.ZipFile, ArchiveCrypto]:
     """Lit meta.json/manifest.json (clair ou dechiffre) avec verification d'integrite (T7.2)."""
     crypto = ArchiveCrypto(passphrase)
     zf = _read_zip(src)
     names = set(zf.namelist())
     if MANIFEST in names and META not in names:
-        raw = zf.read(MANIFEST)
-        manifest = json.loads(raw)
+        manifest = _load_json(zf.read(MANIFEST), MANIFEST)
         if manifest.get("format") != FORMAT:
             raise ArchiveError("format inconnu (attendu: osia-archive)")
         if str(manifest.get("format_version")) != FORMAT_VERSION:
             raise ArchiveError(f"version non supportee: {manifest.get('format_version')} (attendu {FORMAT_VERSION})")
+        if not isinstance(manifest.get("files"), list):
+            raise ArchiveError("manifeste invalide : files absent")
         _verify_files(zf, manifest["files"], encrypted=False)
         return {}, manifest, zf, crypto
     if META in names:
-        meta = json.loads(zf.read(META))
+        meta = _load_json(zf.read(META), META)
         if meta.get("format") != FORMAT:
             raise ArchiveError("format inconnu (attendu: osia-archive)")
         if str(meta.get("format_version")) != FORMAT_VERSION:
             raise ArchiveError(f"version non supportee: {meta.get('format_version')} (attendu {FORMAT_VERSION})")
-        key = crypto.key_from_params(passphrase, meta["kdf"])
-        nonce = base64.b64decode(meta["manifest_nonce_b64"])
-        manifest = json.loads(crypto.decrypt(nonce, zf.read(meta["manifest_enc"]), key))
+        try:
+            key = crypto.key_from_params(passphrase, meta["kdf"])
+            nonce = base64.b64decode(meta["manifest_nonce_b64"])
+            manifest_enc = meta["manifest_enc"]
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ArchiveError("meta.json invalide : parametres de chiffrement absents ou illisibles") from exc
+        manifest = _load_json(crypto.decrypt(nonce, zf.read(manifest_enc), key), "manifeste chiffre")
+        if not isinstance(manifest.get("files"), list):
+            raise ArchiveError("manifeste invalide : files absent")
         _verify_files(zf, manifest["files"], encrypted=True, key=key, crypto=crypto)
         return meta, manifest, zf, crypto
     raise ArchiveError("archive .osia invalide : manifeste absent")

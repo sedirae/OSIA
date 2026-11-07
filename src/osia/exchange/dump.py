@@ -263,14 +263,16 @@ async def import_payload(
     from ..ids import new_id
 
     report: dict[str, Any] = {"mode": mode, "inserted": {}, "skipped": {}, "remapped": 0, "conflicts": [], "normalized_states": []}
+    deferred_updates: list[tuple[str, str, Any, str, Any]] = []
 
     async with pool.acquire() as conn:
         async with conn.transaction():
-            conflicts = await detect_conflicts(conn, payload)
-            if conflicts:
-                report["conflicts"] = conflicts
-                if on_conflict == "fail":
-                    raise ImportConflictError(conflicts)
+            if mode == "merge":
+                conflicts = await detect_conflicts(conn, payload)
+                if conflicts:
+                    report["conflicts"] = conflicts
+                    if on_conflict == "fail":
+                        raise ImportConflictError(conflicts)
             id_map: dict[str, dict[str, str]] = {t: {} for t in IMPORT_ORDER}
             if mode == "add":
                 for table in IMPORT_ORDER:
@@ -293,16 +295,6 @@ async def import_payload(
                     new_row = dict(row)
                     if mode == "add" and not spec.get("serial") and table != "proof_files":
                         new_row[pk] = id_map[table][row[pk]]
-                    for col, ref_table in refs.items():
-                        if new_row.get(col) is not None:
-                            if mode == "add" and not TABLES[ref_table].get("serial"):
-                                new_row[col] = id_map[ref_table][new_row[col]]
-                            elif col in deferred:
-                                new_row[col] = None
-                    if table == "decisions" and new_row.get("target_id") is not None:
-                        rt = target_ref.get(new_row.get("target_type"))
-                        if rt and mode == "add":
-                            new_row["target_id"] = id_map[rt].get(new_row["target_id"], new_row["target_id"])
                     if spec.get("serial"):
                         new_row.pop("id", None)
                     if mode == "merge" and not spec.get("serial"):
@@ -310,6 +302,19 @@ async def import_payload(
                         if existing is not None:
                             skipped += 1
                             continue
+                    pending_deferred: list[tuple[str, Any]] = []
+                    for col, ref_table in refs.items():
+                        if new_row.get(col) is not None:
+                            if col in deferred:
+                                mapped = id_map[ref_table][new_row[col]] if mode == "add" and not TABLES[ref_table].get("serial") else new_row[col]
+                                pending_deferred.append((col, mapped))
+                                new_row[col] = None
+                            elif mode == "add" and not TABLES[ref_table].get("serial"):
+                                new_row[col] = id_map[ref_table][new_row[col]]
+                    if table == "decisions" and new_row.get("target_id") is not None:
+                        rt = target_ref.get(new_row.get("target_type"))
+                        if rt and mode == "add":
+                            new_row["target_id"] = id_map[rt].get(new_row["target_id"], new_row["target_id"])
                     if table == "investigations" and new_row.get("state") == "running":
                         new_row["state"] = "suspended"
                         report["normalized_states"].append(new_row[pk])
@@ -338,22 +343,15 @@ async def import_payload(
                     if table == "proof_files":
                         sql += " ON CONFLICT (sha256) DO NOTHING"
                     await conn.execute(sql, *values)
+                    for col, mapped in pending_deferred:
+                        deferred_updates.append((table, pk, new_row[pk], col, mapped))
                     if mode == "add" and not spec.get("serial") and table != "proof_files":
                         report["remapped"] += 1
                     inserted += 1
                 report["inserted"][table] = inserted
                 report["skipped"][table] = skipped
-            for table in IMPORT_ORDER:
-                spec = TABLES[table]
-                for col in spec.get("deferred", []):
-                    ref_table = spec["refs"][col]
-                    for old_id, new_id in id_map[ref_table].items():
-                        for row in payload.get(table, []):
-                            if row.get(col) == old_id:
-                                await conn.execute(
-                                    f"UPDATE {table} SET {col} = $1 WHERE {spec['pk']} = $2",
-                                    new_id, id_map[table].get(row[spec["pk"]], row[spec["pk"]]) if mode == "add" and not spec.get("serial") else row[spec["pk"]],
-                                )
+            for table, pk_col, pk_val, col, mapped in deferred_updates:
+                await conn.execute(f"UPDATE {table} SET {col} = $1 WHERE {pk_col} = $2", mapped, pk_val)
     return report
 
 

@@ -153,7 +153,10 @@ class ExchangeService:
 
     async def preview_import(self, src: pathlib.Path, passphrase: Optional[str] = None) -> dict[str, Any]:
         meta, manifest, zf, crypto = read_meta_and_manifest(src, passphrase)
-        payload, _ = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=None if not manifest.get("encrypted") else crypto.key_from_params(passphrase, meta["kdf"]), crypto=crypto)
+        try:
+            payload, _ = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=None if not manifest.get("encrypted") else crypto.key_from_params(passphrase, meta["kdf"]), crypto=crypto)
+        finally:
+            zf.close()
         async with self.pool.acquire() as conn:
             conflicts = await detect_conflicts(conn, payload)
         return {
@@ -179,8 +182,11 @@ class ExchangeService:
         if on_conflict not in ("fail", "skip"):
             raise ArchiveError(f"on_conflict inconnu: {on_conflict}")
         meta, manifest, zf, crypto = read_meta_and_manifest(src, passphrase)
-        key = crypto.key_from_params(passphrase, meta["kdf"]) if manifest.get("encrypted") else None
-        payload, proofs = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=key, crypto=crypto)
+        try:
+            key = crypto.key_from_params(passphrase, meta["kdf"]) if manifest.get("encrypted") else None
+            payload, proofs = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=key, crypto=crypto)
+        finally:
+            zf.close()
         staged = self._stage_proof_files(proofs)
         for row in payload.get("proof_files", []):
             sha = row["sha256"]
