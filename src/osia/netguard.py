@@ -36,6 +36,9 @@ _ALLOWED_SCHEMES = {"http", "https"}
 # un domaine de cette liste n'est PAS un domaine enregistrable ; l'autoriser ouvrirait
 # l'allowlist à n'importe quel site sous ce suffixe (ex. autoriser "co.uk" ouvrirait
 # "evil.co.uk"). Réserve audit PR#21 P3-3 : heuristique de suffixe enregistrable.
+# Limites assumées (audit PR#24 P3-d) : les TLD nus ("com", "uk") et les suffixes publics
+# hors liste ("github.io"…) restent autorisables — la liste est une heuristique courte,
+# pas une PSL complète.
 _PUBLIC_SUFFIXES = {
     "co.uk", "org.uk", "ac.uk", "gov.uk", "ltd.uk", "me.uk", "net.uk", "sch.uk",
     "com.au", "net.au", "org.au", "co.nz", "co.za", "com.br", "com.mx", "com.ar",

@@ -59,12 +59,23 @@ def make_connector(pinned: Optional[PinnedTarget]) -> aiohttp.TCPConnector:
     return aiohttp.TCPConnector()
 
 
+def pool_key(pinned: Optional[PinnedTarget], fallback: str = "default") -> str:
+    """Clé de pool : inclut le statut épinglé ET les IPs validées (audit PR#24 P3-c) —
+    une session créée sans pin ne doit jamais être réutilisée pour un appel épinglé
+    (le pin serait perdu, anti-TOCTOU affaibli), et un changement d'IPs validées pour un
+    même host doit ouvrir une nouvelle session."""
+    if pinned is None:
+        return fallback
+    return f"pinned:{pinned.host}:{','.join(pinned.ips)}"
+
+
 class SessionPool:
     """Pool de sessions aiohttp réutilisées entre requêtes (réserve audit PR#18 :
     auparavant une ClientSession + un TCPConnector étaient créés PAR requête).
 
-    Une session épinglée (PinnedResolver) ne peut servir que son host : la clé du pool est
-    donc le host épinglé (ou "default"). Les sessions sont fermées via `close()`."""
+    Une session épinglée (PinnedResolver) ne peut servir que son host ET ses IPs : la clé
+    du pool est donc `pool_key(pinned)` (ou "default"). Les sessions sont fermées via
+    `close()`."""
 
     def __init__(self) -> None:
         import asyncio

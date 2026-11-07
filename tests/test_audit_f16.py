@@ -22,8 +22,8 @@ from osia.config import Settings
 from osia.exchange.archive import MANIFEST, ArchiveError, extract_payload, read_and_verify
 from osia.exchange.crypto import ArchiveCrypto
 from osia.models import CreateBranchRequest, StopReason
-from osia.netguard import NetworkGuard, NetworkPolicy
-from osia.nethttp import SessionPool
+from osia.netguard import NetworkGuard, NetworkPolicy, PinnedTarget
+from osia.nethttp import SessionPool, pool_key
 from osia.policies.limits import limits_from_record
 
 from conftest import make_investigation
@@ -201,3 +201,14 @@ async def test_f16_session_pool_reuses_sessions():
         assert s3 is not s1
     finally:
         await pool.close()
+
+
+def test_f16_pool_key_separates_pinned_and_unpinned():
+    # Audit PR#24 P3-c : la clé inclut le statut épinglé et les IPs validées — une session
+    # non épinglée ne doit jamais être réutilisée pour un appel épinglé (anti-TOCTOU).
+    pinned = PinnedTarget(host="a.test", port=443, ips=["192.0.2.1"])
+    pinned2 = PinnedTarget(host="a.test", port=443, ips=["192.0.2.2"])
+    assert pool_key(None) == "default"
+    assert pool_key(pinned) != pool_key(None)
+    assert pool_key(pinned) != pool_key(pinned2)
+    assert pool_key(pinned, fallback="x") == pool_key(pinned)

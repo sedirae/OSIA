@@ -253,10 +253,12 @@ class Orchestrator:
         # aucun état intermédiaire observable (crash = rollback complet).
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                inv = await conn.fetchrow(
-                    "UPDATE investigations SET state = $2, stop_reason = NULL, updated_at = now() WHERE id = $1 RETURNING *",
-                    investigation_id,
-                    InvestigationState.SUSPENDED.value,
+                inv = _norm_row(
+                    await conn.fetchrow(
+                        "UPDATE investigations SET state = $2, stop_reason = NULL, updated_at = now() WHERE id = $1 RETURNING *",
+                        investigation_id,
+                        InvestigationState.SUSPENDED.value,
+                    )
                 )
                 await conn.execute(
                     "UPDATE tasks SET state = 'interrupted', updated_at = now() "

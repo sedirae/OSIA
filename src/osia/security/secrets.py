@@ -53,6 +53,10 @@ class SecretStore:
         return self._key
 
     def _load(self) -> None:
+        # T5.5/D2 (audit F16) : persist=False (défaut) -> un coffre secrets.enc préexistant
+        # n'est PAS relu (défaut sûr : secrets en mémoire). Migration d'une install
+        # existante : lancer avec OSIA_SECRETS_PERSIST=1 pour relire le coffre, puis
+        # repasser à 0 si le coffre ne doit plus être persistant.
         if not self.persist or not self._store_path.exists():
             return
         raw = self._store_path.read_bytes()

@@ -387,7 +387,16 @@ async def _cmd_secrets_set(args) -> int:
     store = SecretStore(settings.paths.config_dir, persist=settings.secrets_persist)
     value = os.environ.get("OSIA_SECRET_VALUE") or getpass.getpass(f"Valeur du secret {args.name} : ")
     store.set(args.name, value)
-    print(f"secret enregistré (chiffré si persistance activée) : {args.name}")
+    if settings.secrets_persist:
+        print(f"secret enregistré (chiffré, persistant) : {args.name}")
+    else:
+        # Audit PR#24 P3-a : sans persistance (défaut T5.5/D2), le secret vit dans ce
+        # processus CLI qui meurt aussitôt — avertir explicitement, jamais silencieusement.
+        print(
+            f"secret enregistré EN MÉMOIRE UNIQUEMENT : {args.name} — perdu à la fin de cette commande "
+            "(OSIA_SECRETS_PERSIST=0, T5.5/D2). Pour un coffre persistant : OSIA_SECRETS_PERSIST=1",
+            file=sys.stderr,
+        )
     return 0
 
 

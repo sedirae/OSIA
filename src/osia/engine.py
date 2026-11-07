@@ -10,6 +10,7 @@ from .connectors.real import build_real_connectors
 from .events import EventBus
 from .exchange import ExchangeService
 from .netguard import NetworkGuard, NetworkPolicy
+from .nethttp import close_default_session_pool
 from .graph import GraphService
 from .orchestrator import Orchestrator
 from .policies import BudgetManager, PolicyEngine
@@ -150,4 +151,7 @@ class Engine:
             await self._runner
         if self.pool:
             await self.pool.close()
+        # Audit PR#24 P3-c : fermer les sessions HTTP poolées à l'arrêt (évite les
+        # warnings aiohttp de session non fermée).
+        await close_default_session_pool()
         self.techlog.log("engine", "engine.stop")
