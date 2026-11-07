@@ -90,6 +90,15 @@ class ConnectorHealthChecker:
                 detail=f"sonde refusée par le NetworkGuard (restriction bloquante, T5.4) : {exc.reason}",
                 probe_url=query,
             )
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # B7 §9.1 : une réponse reçue mais illisible (corps non JSON attendu) est un
+            # problème de structure -> dégradé, pas une indisponibilité réseau.
+            return HealthReport(
+                connector_id=cid,
+                state=HealthState.DEGRADE,
+                detail=f"réponse reçue mais structure inattendue (corps illisible) : {type(exc).__name__} : {exc}",
+                probe_url=query,
+            )
         except Exception as exc:  # sonde indisponible : timeout, DNS, connexion refusée...
             return HealthReport(
                 connector_id=cid,
