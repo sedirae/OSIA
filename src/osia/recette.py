@@ -151,9 +151,9 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
     # F05 : mode démo explicitement visible — seuls les connecteurs simulés restent actifs pendant
     # la recette hors ligne ; la sélection automatique retombe donc sur simulated.web (et le
     # relevé le montre via source_calls), jamais sur un connecteur réel en production.
+    # L'état d'activation d'origine est mémorisé et restauré quoi qu'il arrive (P3-3).
     real_ids = [e["id"] for e in engine.registry.list() if not e["id"].startswith("simulated.")]
-    for cid in real_ids:
-        engine.registry.set_enabled(cid, False)
+    prev_enabled = {cid: cid in engine.registry.authorized_ids() for cid in real_ids}
     # Rejouabilité (T3.14) : le cache technique des requêtes source (B-ACC-06) est réinitialisé
     # avant chaque scénario — un hit cache court-circuite la chaîne (pas de preuve, pas de
     # tâche synthesize) et casserait le relevé comme la comparaison entre exécutions.
@@ -167,6 +167,8 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
         await engine.start()
     inv_ids: set[str] = set()
     try:
+        for cid in real_ids:
+            engine.registry.set_enabled(cid, False)
         inv = await engine.orchestrator.start_investigation(
             CreateInvestigationRequest(title=spec["title"], objective=spec["objective"], profile_id=spec.get("profile_id", "rapide"))
         )
@@ -196,8 +198,8 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
                 "separated": set(releve["entities"]).isdisjoint(releve2["entities"]),
             }
     finally:
-        for cid in real_ids:
-            engine.registry.set_enabled(cid, True)
+        for cid, was_enabled in prev_enabled.items():
+            engine.registry.set_enabled(cid, was_enabled)
         if manage_engine:
             engine.scheduler.stop()
             if engine._runner:

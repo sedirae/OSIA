@@ -205,6 +205,34 @@ async def test_f06_decisive_proof_ids_invente_rejete_decisive_sources_url_repli(
     assert decisive and decisive[0]["proof_ids"] == [proof["proof_ref_id"]]
 
 
+async def test_f06_payload_decision_humain_tronque_dans_le_contexte(engine):
+    """P2-1 (audit PR #20) : un payload de décision volumineux (jsonb = dict) est sérialisé puis
+    tronqué — le contexte de synthèse reste borné quelle que soit la taille du graphe."""
+    import json as _json
+
+    from osia.ids import new_id
+    from osia.models import ClaimNature, SupportLevel
+
+    inv = await make_investigation(engine)
+    branch = await _branch(engine, inv)
+    assertion = await engine.graph.add_assertion(
+        inv["id"], branch_id=branch["id"], statement="s1", nature=ClaimNature.HYPOTHESE,
+        support_level=SupportLevel.A_CONFIRMER, proof_ids=[], decisive=False, derivation="ia",
+    )
+    await engine.pool.execute(
+        "INSERT INTO decisions (id, investigation_id, assertion_id, action, payload) VALUES ($1, $2, $3, $4, $5::jsonb)",
+        new_id("dec"), inv["id"], assertion["id"], "reject", _json.dumps({"comment": "x" * 5000}),
+    )
+    engine.broker.adapters["simulated"].scripted = {
+        "synthesis": {"conclusion": "c", "support": "à confirmer", "objective_sufficiently_supported": False}
+    }
+    task = await _insert(engine, inv, branch["id"], "synthesize", {"query": "q"}, depth=0, priority=5)
+    await handle_synthesize(task, TaskContext(engine=engine))
+    call = engine.broker.adapters["simulated"].calls[-1]
+    assert len(call["input"]["decisions"]) == 1
+    assert len(call["input"]["decisions"][0]["payload"]) <= 1010  # 1000 + ellipsis
+
+
 # ---------- F09 : cache complet ----------
 
 

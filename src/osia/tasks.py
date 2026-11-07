@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -384,7 +385,9 @@ async def _build_synthesis_input(engine: "Engine", inv: asyncpg.Record, task: as
             "id": d["id"],
             "assertion_id": d["assertion_id"],
             "action": d["action"],
-            "payload": _trunc(d["payload"], 1000) if not isinstance(d["payload"], str) else _trunc(d["payload"], 1000),
+            # P2-1 (audit PR #20) : payload jsonb = dict, sérialisé PUIS tronqué — le contexte
+            # de synthèse reste borné quelle que soit la taille du payload de la décision.
+            "payload": _trunc(d["payload"] if isinstance(d["payload"], str) else json.dumps(d["payload"], ensure_ascii=False, default=str), 1000),
             "created_at": d["created_at"].isoformat() if d["created_at"] else None,
         }
         for d in (await engine.graph.list_decisions(inv["id"], limit=SYNTHESIS_MAX_DECISIONS))[:SYNTHESIS_MAX_DECISIONS]
