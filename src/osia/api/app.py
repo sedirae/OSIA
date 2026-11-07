@@ -22,6 +22,8 @@ from ..models import (
     AITestRequest,
     ApiError,
     BackupCreateRequest,
+    CachePurgeRequest,
+    LogPurgeRequest,
     CreateBranchRequest,
     CreateInvestigationRequest,
     DecisionRequest,
@@ -199,12 +201,70 @@ def create_app(engine: Engine) -> FastAPI:
             updated[key] = value
         if "audit_retention_days" in updated:
             engine.audit.retention_days = int(updated["audit_retention_days"])
+        if "tech_log_retention_days" in updated:
+            engine.techlog.retention_days = int(updated["tech_log_retention_days"])
         if "session_ttl_hours" in updated:
             from datetime import timedelta
 
             engine.sessions.ttl = timedelta(hours=int(updated["session_ttl_hours"]))
         _audit_op("op.settings.update", request, {"keys": sorted(updated)})
         return {"updated": updated}
+
+    @app.get("/api/v1/logs")
+    async def logs_overview(request: Request) -> dict:
+        """CON-18 / T3.13 + T5.9 + D4 : les TROIS finalités de journalisation, distinctes —
+        audit de sécurité (T5.9), journal technique structuré (T3.13), historique métier en
+        base (events/decisions/external_ops/ledger : jamais de purge automatique, D4 §6.1.A)."""
+        await require_auth(request)
+        audit_path = engine.audit.path
+        return {
+            "audit_security": {
+                "path": str(audit_path),
+                "retention_days": engine.audit.retention_days,
+                "bytes": audit_path.stat().st_size if audit_path.exists() else 0,
+            },
+            "tech_log": engine.techlog.stats(),
+            "business_history": {
+                "note": "tables events/decisions/external_ops/ledger en base — conservées tant que l'investigation est conservée (D4 §6.5)",
+                "retention_days": None,
+            },
+        }
+
+    @app.post("/api/v1/logs/purge")
+    async def logs_purge(request: Request, body: LogPurgeRequest) -> dict:
+        """CON-18 / D4 : purge manuelle supervisée d'un journal (dry_run = prévisualisation des
+        gains). L'opération de purge elle-même est auditée (T5.9). L'historique métier n'est
+        jamais purgé."""
+        await require_auth(request)
+        if body.kind == "tech":
+            if body.dry_run:
+                result = {"kind": "tech", "dry_run": True, "expired_entries": engine.techlog.expired_count(), "stats": engine.techlog.stats()}
+            else:
+                removed = engine.techlog.purge()
+                result = {"kind": "tech", "dry_run": False, "removed_entries": removed, "stats": engine.techlog.stats()}
+        else:
+            if body.dry_run:
+                result = {"kind": "audit", "dry_run": True, "expired_entries": engine.audit.expired_count()}
+            else:
+                removed = engine.audit.purge()
+                result = {"kind": "audit", "dry_run": False, "removed_entries": removed}
+        _audit_op("op.logs.purge", request, result)
+        return result
+
+    @app.post("/api/v1/cache/purge")
+    async def cache_purge(request: Request, body: CachePurgeRequest) -> dict:
+        """CON-18 / D4 §6.1.B : purge du cache technique des requêtes source, avec
+        prévisualisation (dry_run). Le cache n'est jamais nécessaire à la traçabilité (D4 §6.5) ;
+        les preuves restent dans le dossier d'investigation."""
+        await require_auth(request)
+        if body.dry_run:
+            stats = await engine.repo.cache_expired_stats()
+            result = {"dry_run": True, "expired_entries": stats["entries"], "expired_bytes": stats["bytes"]}
+        else:
+            removed = await engine.repo.cache_purge_expired()
+            result = {"dry_run": False, "purged_entries": removed}
+        _audit_op("op.cache.purge", request, result)
+        return result
 
     @app.post("/api/v1/investigations", status_code=201)
     async def create_investigation(

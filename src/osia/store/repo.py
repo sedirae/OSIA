@@ -136,6 +136,13 @@ class Repo:
         status = await self.pool.execute("DELETE FROM source_cache WHERE expires_at <= now()")
         return int(status.split()[-1]) if status else 0
 
+    async def cache_expired_stats(self) -> dict[str, int]:
+        """CON-18 : compteur (dry-run) des entrées de cache expirées et de leurs octets."""
+        row = await self.pool.fetchrow(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(pg_column_size(result)), 0) AS bytes FROM source_cache WHERE expires_at <= now()"
+        )
+        return {"entries": int(row["n"]), "bytes": int(row["bytes"])}
+
     async def insert_investigation(
         self,
         *,

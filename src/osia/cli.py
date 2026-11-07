@@ -291,6 +291,59 @@ async def _cmd_audit(args) -> int:
     return 0
 
 
+async def _cmd_logs_list(args) -> int:
+    """CON-18 / T3.13 : affiche un journal (tech ou audit) — entrées structurées, secrets masqués."""
+    from .security import SecurityAudit
+    from .techlog import TechLog
+
+    settings = _settings()
+    if args.kind == "audit":
+        log = SecurityAudit(settings.paths.log_dir, retention_days=settings.audit_retention_days)
+    else:
+        log = TechLog(settings.paths.log_dir, retention_days=settings.tech_log_retention_days)
+    for entry in log.read(limit=args.limit):
+        print(json.dumps(entry, ensure_ascii=False))
+    return 0
+
+
+async def _cmd_logs_purge(args) -> int:
+    """CON-18 / C6 / D4 §6 : purge supervisée d'un journal — prévisualisation par défaut,
+    --apply pour exécuter. L'opération est auditée ; l'historique métier n'est jamais purgé."""
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    if args.kind == "audit":
+        expired = engine.audit.expired_count()
+        removed = engine.audit.purge() if args.apply else 0
+    else:
+        expired = engine.techlog.expired_count()
+        removed = engine.techlog.purge() if args.apply else 0
+    engine.audit.log("op.logs.purge", "success", detail={"kind": args.kind, "dry_run": not args.apply, "expired_entries": expired, "removed_entries": removed}, client=None)
+    print(json.dumps({"kind": args.kind, "dry_run": not args.apply, "expired_entries": expired, "removed_entries": removed if args.apply else 0}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_cache_purge(args) -> int:
+    """CON-18 / D4 §6.1.B : purge du cache des requêtes source expirées — dry-run par défaut,
+    --apply pour exécuter. Les preuves et l'historique métier restent intacts (D4 §6.5)."""
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    if args.apply:
+        removed = await engine.repo.cache_purge_expired()
+        engine.audit.log("op.cache.purge", "success", detail={"dry_run": False, "purged_entries": removed}, client=None)
+        print(json.dumps({"dry_run": False, "purged_entries": removed}, ensure_ascii=False))
+    else:
+        stats = await engine.repo.cache_expired_stats()
+        engine.audit.log("op.cache.purge", "success", detail={"dry_run": True, "expired_entries": stats["entries"], "expired_bytes": stats["bytes"]}, client=None)
+        print(json.dumps({"dry_run": True, "expired_entries": stats["entries"], "expired_bytes": stats["bytes"]}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
 async def _cmd_net_policy(args) -> int:
     """CON-06 / T5.4 : affiche la politique réseau effective."""
     from .engine import Engine
@@ -492,6 +545,8 @@ async def _cmd_settings_set(args) -> int:
     await engine.repo.set_setting(args.key, value)
     if args.key == "audit_retention_days":
         engine.audit.retention_days = int(value)
+    if args.key == "tech_log_retention_days":
+        engine.techlog.retention_days = int(value)
     if args.key == "session_ttl_hours":
         from datetime import timedelta
 
@@ -624,6 +679,23 @@ def main(argv: list[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="afficher le journal d'audit de sécurité (T5.9, sans secrets)")
     audit.add_argument("--limit", type=int, default=100)
     audit.set_defaults(func=_cmd_audit)
+
+    logs = sub.add_parser("logs", help="journaux structurés (CON-18, T3.13) — finalités distinctes, secrets masqués")
+    logs_sub = logs.add_subparsers(dest="logs_command", required=True)
+    llist = logs_sub.add_parser("list", help="afficher un journal (tech ou audit)")
+    llist.add_argument("--kind", choices=["tech", "audit"], default="tech")
+    llist.add_argument("--limit", type=int, default=100)
+    llist.set_defaults(func=_cmd_logs_list)
+    lpurge = logs_sub.add_parser("purge", help="purger un journal expiré (prévisualisation par défaut, --apply pour exécuter)")
+    lpurge.add_argument("--kind", choices=["tech", "audit"], required=True)
+    lpurge.add_argument("--apply", action="store_true", help="exécuter la purge (sinon simple prévisualisation)")
+    lpurge.set_defaults(func=_cmd_logs_purge)
+
+    cache = sub.add_parser("cache", help="cache technique des requêtes source (CON-18, D4 §6.1.B)")
+    cache_sub = cache.add_subparsers(dest="cache_command", required=True)
+    cpurge = cache_sub.add_parser("purge", help="purger les entrées expirées (dry-run par défaut, --apply pour exécuter)")
+    cpurge.add_argument("--apply", action="store_true", help="exécuter la purge (sinon simple prévisualisation)")
+    cpurge.set_defaults(func=_cmd_cache_purge)
 
     net = sub.add_parser("net", help="politique réseau centralisée (CON-06, T5.4)")
     net_sub = net.add_subparsers(dest="net_command", required=True)

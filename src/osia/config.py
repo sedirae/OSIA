@@ -108,6 +108,7 @@ class Settings:
     tls_autogen: bool = False
     session_ttl_hours: int = 8
     audit_retention_days: int = 90
+    tech_log_retention_days: int = 30  # CON-18 / T3.13 : journal technique, rétention distincte
     net_allow_domains: list[str] = field(default_factory=list)
     net_deny_domains: list[str] = field(default_factory=list)
     net_max_bytes: int = 10 * 1024 * 1024
@@ -146,6 +147,9 @@ class Settings:
         retention = os.environ.get("OSIA_AUDIT_RETENTION_DAYS")
         if retention:
             settings.audit_retention_days = int(retention)
+        tretention = os.environ.get("OSIA_TECH_LOG_RETENTION_DAYS")
+        if tretention:
+            settings.tech_log_retention_days = int(tretention)
         allow = os.environ.get("OSIA_NET_ALLOW_DOMAINS", "")
         if allow:
             settings.net_allow_domains = [d.strip().lower() for d in allow.split(",") if d.strip()]

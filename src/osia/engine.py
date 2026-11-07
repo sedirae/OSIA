@@ -20,6 +20,7 @@ from .store import create_pool, migrate
 from .store.files import FileStore
 from .store.repo import Repo
 from .tasks import DEFAULT_HANDLERS
+from .techlog import TechLog
 
 
 class Engine:
@@ -42,6 +43,7 @@ class Engine:
         self.orchestrator: Orchestrator
         self.scheduler: Scheduler
         self.audit: SecurityAudit
+        self.techlog: TechLog
         self.sessions: SessionManager
         self.netguard: NetworkGuard
         self.secrets: SecretStore
@@ -61,6 +63,11 @@ class Engine:
         await self.repo.set_setting("timezone", await self.repo.get_setting("timezone", self.settings.timezone))
         # CON-13 / V1.4 : TTL du cache technique des requêtes source (24 h par défaut)
         await self.repo.set_setting("source_cache_ttl_hours", await self.repo.get_setting("source_cache_ttl_hours", 24))
+        # CON-18 / T3.13 : rétention du journal technique (distincte de l'audit de sécurité)
+        await self.repo.set_setting(
+            "tech_log_retention_days",
+            await self.repo.get_setting("tech_log_retention_days", self.settings.tech_log_retention_days),
+        )
         # CON-13 / D7 §9.1 : les paramètres administrables sont seedés pour exposer leur valeur
         # effective (GET /api/v1/settings) dès le premier démarrage
         await self.repo.set_setting("audit_retention_days", await self.repo.get_setting("audit_retention_days", self.settings.audit_retention_days))
@@ -72,6 +79,10 @@ class Engine:
         self.filestore = FileStore(self.pool, self.settings.paths)
         self.external_semaphore = asyncio.Semaphore(2)
         self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
+        self.techlog = TechLog(
+            self.settings.paths.log_dir,
+            retention_days=await self.repo.get_setting("tech_log_retention_days", self.settings.tech_log_retention_days),
+        )
         self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
         self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
         connector = SimulatedConnector()
@@ -116,6 +127,7 @@ class Engine:
             role_models=role_models,
             allowed_fallbacks=allowed_fallbacks,
             semaphore=self.external_semaphore,
+            techlog=self.techlog,
         )
         self.health = ConnectorHealthChecker(self.registry)
         self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
@@ -124,10 +136,12 @@ class Engine:
         self.backup = BackupService(self.pool, self.repo, self.bus, self.settings.paths, self.settings)
         self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
+        self.techlog.log("engine", "engine.setup", detail={"mode": self.settings.mode})
 
     async def start(self) -> dict:
         recovery = await self.scheduler.recover()
         self._runner = asyncio.create_task(self.scheduler.run_forever())
+        self.techlog.log("engine", "engine.start", detail={"recovered_tasks": recovery.get("recovered") if isinstance(recovery, dict) else None})
         return recovery
 
     async def stop(self) -> None:
@@ -136,3 +150,4 @@ class Engine:
             await self._runner
         if self.pool:
             await self.pool.close()
+        self.techlog.log("engine", "engine.stop")
