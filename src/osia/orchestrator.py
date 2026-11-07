@@ -101,6 +101,17 @@ class Orchestrator:
         profile = await self.repo.get_profile(inv["profile_id"])
         if profile is None:
             raise PolicyDeny(f"profil_inconnu:{inv['profile_id']}", "branche")
+        # CON-13 / D3 §5.4 : une demande de branche au-dessus du plafond de l'investigation est
+        # refusée explicitement (jamais clampée silencieusement vers le haut).
+        if req.limits:
+            for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
+                demanded = req.limits.get(field)
+                if (
+                    isinstance(demanded, int)
+                    and not isinstance(demanded, bool)
+                    and demanded > getattr(inv_limits, field)
+                ):
+                    raise PolicyDeny(f"plafond_branche_superieur:{field}", "branche")
         branch_limits = limits_from_profile_row(profile, req.limits)
         for field in ("max_rebonds", "max_source_requests", "max_ai_calls", "max_duration_seconds", "max_cost_cents"):
             if getattr(branch_limits, field) > getattr(inv_limits, field):

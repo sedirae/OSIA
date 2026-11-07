@@ -70,6 +70,72 @@ class Repo:
     async def list_profiles(self) -> list[asyncpg.Record]:
         return await self._fetch("SELECT * FROM profiles ORDER BY id")
 
+    async def create_profile(self, *, profile_id: str, name: str, limits: dict[str, Any], is_default: bool = False) -> asyncpg.Record:
+        """CON-13 / D3 §5.3 : profil personnalisé enregistrable. Bornes validées par le CHECK SQL
+        (rebonds 1–10, etc.) ; un seul profil par défaut (les autres sont désactivés)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                if is_default:
+                    await conn.execute("UPDATE profiles SET is_default = false")
+                return _norm_row(
+                    await conn.fetchrow(
+                        "INSERT INTO profiles (id, name, max_rebonds, max_source_requests, max_ai_calls, max_duration_seconds, max_cost_cents, is_default) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+                        profile_id,
+                        name,
+                        int(limits["max_rebonds"]),
+                        int(limits["max_source_requests"]),
+                        int(limits["max_ai_calls"]),
+                        int(limits["max_duration_seconds"]),
+                        int(limits["max_cost_cents"]),
+                        is_default,
+                    )
+                )
+
+    # ---------- Cache technique des requêtes source (CON-13, V1.4 : TTL 24 h par défaut) ----------
+
+    @staticmethod
+    def cache_key(connector_id: str, query: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(f"{connector_id}\0{query.strip()}".encode("utf-8")).hexdigest()
+
+    async def cache_get(self, connector_id: str, query: str) -> Optional[dict[str, Any]]:
+        """Résultat encore valide (B-ACC-06) ou None. La fraîcheur est tracée (D4 §6.2)."""
+        row = await self._fetchrow(
+            "SELECT result, fetched_at, expires_at FROM source_cache WHERE connector_id = $1 AND query_hash = $2 AND expires_at > now()",
+            connector_id,
+            self.cache_key(connector_id, query),
+        )
+        if row is None:
+            return None
+        result = row["result"]
+        if isinstance(result, str):
+            result = json.loads(result)
+        return {**result, "cached": True, "fetched_at": row["fetched_at"].isoformat(), "expires_at": row["expires_at"].isoformat()}
+
+    async def cache_set(self, connector_id: str, query: str, result: dict[str, Any], ttl_hours: int) -> None:
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        await self.pool.execute(
+            "INSERT INTO source_cache (id, connector_id, query_hash, result, fetched_at, expires_at) "
+            "VALUES ($1, $2, $3, $4::jsonb, $5, $6) "
+            "ON CONFLICT (connector_id, query_hash) DO UPDATE SET result = EXCLUDED.result, fetched_at = EXCLUDED.fetched_at, expires_at = EXCLUDED.expires_at",
+            new_id("cache"),
+            connector_id,
+            self.cache_key(connector_id, query),
+            _json(result),
+            now,
+            now + timedelta(hours=max(1, int(ttl_hours))),
+        )
+
+    async def cache_purge_expired(self) -> int:
+        """Purge du cache technique expiré (D4 §6.1.B : expiration automatique possible car le
+        cache n'est pas nécessaire à la traçabilité des investigations conservées)."""
+        status = await self.pool.execute("DELETE FROM source_cache WHERE expires_at <= now()")
+        return int(status.split()[-1]) if status else 0
+
     async def insert_investigation(
         self,
         *,

@@ -253,10 +253,22 @@ class BudgetManager:
             ) or 0
         )
         available = min(cap - used.get(scope, 0) for scope, cap in caps.items())
+        # D3 §5.4 : avertissements à l'approche d'un plafond (seuil 80 %)
+        warnings: list[str] = []
+        for scope, cap in caps.items():
+            u = used.get(scope, 0)
+            if cap <= 0:
+                if scope == "global_month":
+                    warnings.append("appels payants désactivés : plafond global mensuel à 0 (V1.4, budget 0 € au premier démarrage)")
+                continue
+            pct = round(100 * u / cap)
+            if pct >= 80:
+                warnings.append(f"plafond {scope} atteint à {pct} % ({u}/{cap} centimes)")
         return BudgetView(
             estimated_cents=0,
             reserved_cents=max(reserved, 0),
             consumed_cents=consumed,
             available_cents=max(available, 0),
             caps=caps,
+            warnings=warnings,
         )
