@@ -125,7 +125,7 @@ class RechercheEntreprisesConnector(HttpConnector):
                 for r in results
             ],
         }
-        return self._result(query=request.query, url=url, status=status, payload=normalized)
+        return self._result(query=request.query, url=url, status=status, payload=normalized, raw=body)
 
     def validate_response(self, payload: Any) -> list[str]:
         """Contrôle sémantique de la réponse NORMALISÉE (B7 §9.1)."""
@@ -183,7 +183,7 @@ class BodaccConnector(HttpConnector):
         if total is None:
             total = len(results)
         normalized = {"query": request.query, "total": total, "results": results}
-        return self._result(query=request.query, url=url, status=status, payload=normalized)
+        return self._result(query=request.query, url=url, status=status, payload=normalized, raw=body)
 
     def validate_response(self, payload: Any) -> list[str]:
         if not isinstance(payload, dict) or "results" not in payload:
@@ -237,7 +237,7 @@ class GleifConnector(HttpConnector):
             "query": q,
             "results": [_gleif_record(rec) for rec in data],
         }
-        return self._result(query=q, url=url, status=status, payload=normalized)
+        return self._result(query=q, url=url, status=status, payload=normalized, raw=body)
 
     def validate_response(self, payload: Any) -> list[str]:
         """Contrôle sémantique de la réponse NORMALISÉE (B7 §9.1)."""
@@ -282,10 +282,10 @@ class WebUrlConnector(HttpConnector):
         media = headers.get("content-type", "application/octet-stream").split(";")[0].strip().lower()
         if media == "application/pdf" or url.lower().endswith(".pdf"):
             text = await extract_text_from_pdf_isolated(body)
-            return self._result(query=url, url=url, status=status, payload={"url": url, "media_type": "application/pdf", "text": text}, media_type="application/pdf", extracted_text=text)
+            return self._result(query=url, url=url, status=status, payload={"url": url, "media_type": "application/pdf", "text": text}, media_type="application/pdf", extracted_text=text, raw=body)
         text = body.decode("utf-8", errors="replace")
         extracted = extract_text_from_html(text) if "html" in media else text
-        return self._result(query=url, url=url, status=status, payload={"url": url, "media_type": media, "text": extracted}, media_type=media, extracted_text=extracted)
+        return self._result(query=url, url=url, status=status, payload={"url": url, "media_type": media, "text": extracted}, media_type=media, extracted_text=extracted, raw=body)
 
     def validate_response(self, payload: Any) -> list[str]:
         if not isinstance(payload, dict) or "text" not in payload:

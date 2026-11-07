@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import asyncpg
 
 from .ai.schemas import Extraction, PlanProposal, Synthesis
 from .connectors.base import FetchRequest, FetchResult, Provenance, TrustLevel
+from .connectors.http import HttpStatusError
 from .connectors.select import select_connector_id
 from .models import ClaimNature, OpKind, PolicyDeny, StopReason, SupportLevel
 from .policies.limits import limits_from_record
@@ -221,6 +223,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         # F09 : un hit cache suit le MÊME traitement métier qu'une collecte (preuve rattachée,
         # extraction, synthèse) — il évite seulement l'appel externe redondant. La date et la
         # provenance d'origine sont conservées (entrée de cache non réécrite, événement tracé).
+        raw_b64 = cached.get("raw_b64")
         result = FetchResult(
             content=cached.get("content", ""),
             provenance=Provenance(
@@ -231,10 +234,11 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
             ),
             media_type=cached.get("media_type", "application/json"),
             extracted_text=cached.get("extracted_text"),
+            raw_bytes=base64.b64decode(raw_b64) if raw_b64 else None,  # F13 : original conservé via le cache
         )
         proof = await engine.filestore.store_proof(
             investigation_id=inv["id"],
-            content=result.content.encode("utf-8"),
+            content=result.raw_bytes if result.raw_bytes is not None else result.content.encode("utf-8"),
             source_url=result.provenance.url,
             media_type=result.media_type,
             label=payload["query"],
@@ -297,6 +301,17 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         )
         engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error=f"timeout_source:{decision.timeout_seconds}s", detail={"connector_id": connector.manifest.id})
         raise RuntimeError(f"timeout_source:{decision.timeout_seconds}s") from exc
+    except HttpStatusError as exc:
+        # F13 : 404/429/500… = erreur HTTP distincte d'un résultat vide ; jamais stockée comme preuve.
+        await engine.policy.mark_uncertain(decision.op_id)
+        await engine.bus.emit(
+            type="op.uncertain",
+            investigation_id=inv["id"],
+            branch_id=task["branch_id"],
+            payload={"op_id": decision.op_id, "error": f"http_status:{exc.status}", "http_status": exc.status, "url": exc.url},
+        )
+        engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error=f"http_status:{exc.status}", detail={"connector_id": connector.manifest.id, "http_status": exc.status})
+        raise RuntimeError(f"http_status:{exc.status}") from exc
     except Exception as exc:
         await engine.policy.mark_uncertain(decision.op_id)
         await engine.bus.emit(
@@ -307,9 +322,22 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         )
         engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error=str(exc), detail={"connector_id": connector.manifest.id})
         raise
+    # F13 / B7 §9.1 : validation sémantique du connecteur AVANT stockage, cache et exploitation.
+    # Une réponse 200 de structure invalide est refusée (pas transformée en « absence de résultat »).
+    try:
+        parsed = json.loads(result.content)
+    except (ValueError, TypeError):
+        parsed = result.content
+    problems = connector.validate_response(parsed)
+    if problems:
+        # l'appel externe a bien eu lieu (coût encouru) : l'opération est soldée, la preuve refusée
+        await engine.policy.complete_op(decision.op_id, {"http_status": result.provenance.http_status, "invalid_response": problems})
+        engine.techlog.log("tasks", "source.query", level="error", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), error="reponse_invalide", detail={"connector_id": connector.manifest.id, "problems": problems})
+        raise RuntimeError("reponse_invalide:" + "; ".join(problems))
     proof = await engine.filestore.store_proof(
         investigation_id=inv["id"],
-        content=result.content.encode("utf-8"),
+        # F13 / T2.2 : la preuve conserve les OCTETS ORIGINAUX (raw_bytes), pas le texte normalisé
+        content=result.raw_bytes if result.raw_bytes is not None else result.content.encode("utf-8"),
         source_url=result.provenance.url,
         media_type=result.media_type,
         label=payload["query"],
@@ -324,6 +352,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
             "extracted_text": result.extracted_text,
             "url": result.provenance.url,
             "http_status": result.provenance.http_status,
+            "raw_b64": base64.b64encode(result.raw_bytes).decode("ascii") if result.raw_bytes is not None else None,
         },
         ttl_hours,
     )

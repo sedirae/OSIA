@@ -43,6 +43,16 @@ async def aiohttp_fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple
 aiohttp_fetch.accepts_ctx = True  # le guard lui transmet pinned/max_bytes/same_origin (F02)
 
 
+class HttpStatusError(Exception):
+    """Statut HTTP >= 400 (audit F13, T5.6) : une erreur HTTP (404/429/500…) n'est PAS un
+    résultat vide — elle est levée, jamais transformée en FetchResult « sans contenu »."""
+
+    def __init__(self, status: int, url: str):
+        super().__init__(f"http_status:{status} {url}")
+        self.status = status
+        self.url = url
+
+
 class HttpConnector(Connector):
     """Connecteur HTTP de base (B3) : toute requête sortante passe par le NetworkGuard (T5.4).
 
@@ -65,16 +75,22 @@ class HttpConnector(Connector):
     async def _get(self, url: str, params: Optional[dict[str, Any]] = None) -> tuple[int, dict, bytes]:
         full_url = build_url(url, params)
         if self.netguard is not None:
-            return await self.netguard.guarded_request(self.fetch_fn, full_url)
-        return await self.fetch_fn(full_url)
+            status, headers, body = await self.netguard.guarded_request(self.fetch_fn, full_url)
+        else:
+            status, headers, body = await self.fetch_fn(full_url)
+        if status >= 400:
+            # F13 : 404/429/500… = erreur, distincte d'un résultat vide (jamais un FetchResult)
+            raise HttpStatusError(status, full_url)
+        return status, headers, body
 
-    def _result(self, *, query: str, url: str, status: int, payload: Any, media_type: str = "application/json", extracted_text: Optional[str] = None) -> FetchResult:
+    def _result(self, *, query: str, url: str, status: int, payload: Any, media_type: str = "application/json", extracted_text: Optional[str] = None, raw: Optional[bytes] = None) -> FetchResult:
         content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         return FetchResult(
             content=content,
             provenance=Provenance(source_id=self.manifest.id, url=url, http_status=status),
             media_type=media_type,
             extracted_text=extracted_text if extracted_text is not None else content,
+            raw_bytes=raw,
         )
 
     async def fetch(self, request: FetchRequest) -> FetchResult:

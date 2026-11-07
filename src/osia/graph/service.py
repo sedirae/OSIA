@@ -678,10 +678,14 @@ class GraphService:
             args.extend([limit, offset])
         return [_norm_row(r) for r in await self.pool.fetch(query, *args)]
 
-    async def list_assertions(self, investigation_id: str, *, branch_id: Optional[str] = None, include_superseded: bool = False) -> list[dict]:
+    async def list_assertions(self, investigation_id: str, *, branch_id: Optional[str] = None, branch_ids: Optional[list[str]] = None, include_superseded: bool = False) -> list[dict]:
         query = "SELECT * FROM assertions WHERE investigation_id = $1"
         args: list[Any] = [investigation_id]
-        if branch_id:
+        if branch_ids:
+            # Même sémantique que l'export (F12) : les assertions sans branche (racine) sont incluses.
+            query += " AND (branch_id IS NULL OR branch_id = ANY($2))"
+            args.append(list(branch_ids))
+        elif branch_id:
             query += " AND branch_id = $2"
             args.append(branch_id)
         if not include_superseded:
@@ -728,9 +732,10 @@ class GraphService:
             "branches": branches,
         }
 
-    async def etayage(self, investigation_id: str, branch_id: Optional[str] = None) -> list[dict]:
-        """Vue d'etayage (CON-10) : natures, six dimensions, double statut, preuves (C6, T6.7)."""
-        assertions = await self.list_assertions(investigation_id, branch_id=branch_id)
+    async def etayage(self, investigation_id: str, branch_id: Optional[str] = None, branch_ids: Optional[list[str]] = None) -> list[dict]:
+        """Vue d'etayage (CON-10) : natures, six dimensions, double statut, preuves (C6, T6.7).
+        branch_ids restreint au périmètre des branches choisies (export sélectif, audit F12)."""
+        assertions = await self.list_assertions(investigation_id, branch_id=branch_id, branch_ids=branch_ids)
         out = []
         for a in assertions:
             proof_ids = _as_list(a["proof_ids"])
@@ -754,7 +759,7 @@ class GraphService:
             })
         return out
 
-    async def objective_etaye(self, investigation_id: str, branch_id: Optional[str] = None) -> dict[str, Any]:
+    async def objective_etaye(self, investigation_id: str, branch_id: Optional[str] = None, branch_ids: Optional[list[str]] = None) -> dict[str, Any]:
         """Critere V1.4 evalue par le moteur (T4.6, audit F07) : chaque reponse decisive doit
         s'appuyer sur une PREUVE DIRECTE (proof_ids resolvant vers des preuves existantes) ;
         une source primaire = connecteur dont le manifeste declare primary_source=True (jamais
@@ -764,7 +769,7 @@ class GraphService:
         comptent pas, et aucune contradiction majeure non resolue (T6.6)."""
         trusts = self._trust_levels()
         primaries = self._primary_sources()
-        assertions = await self.list_assertions(investigation_id, branch_id=branch_id)
+        assertions = await self.list_assertions(investigation_id, branch_id=branch_id, branch_ids=branch_ids)
         decisive = [a for a in assertions if a["decisive"]]
         decision_by_id = {a["id"]: a["human_decision"] for a in assertions}
         linked_by: dict[str, list[str]] = {}

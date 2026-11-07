@@ -37,4 +37,5 @@ class SimulatedConnector(Connector):
             ),
             media_type="application/json",
             extracted_text=content,
+            raw_bytes=content.encode("utf-8"),  # F13 : le simulé n'a pas d'original binaire distinct
         )

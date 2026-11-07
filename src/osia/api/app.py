@@ -799,14 +799,20 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     async def index(request: Request):
-        """Interface web (lot C, CON-17) servie par le moteur ; protégée comme l'API en mode
-        serveur même avec frontend (T5.7, EXEC-05)."""
-        await require_auth(request)
+        """Interface web (lot C, CON-17) servie par le moteur. Audit F11 / T5.7 : le shell de
+        connexion est servi SANS authentification en mode serveur — un navigateur neuf doit
+        pouvoir charger la page et son formulaire de connexion (aucune donnée sensible dans le
+        shell : index.html/app.js/styles.css). Toutes les données restent sous /api/v1/*,
+        protégé par require_auth ; le frontend échange le jeton admin contre une session
+        expirable/révocable via POST /api/v1/auth/login (CON-05)."""
         return FileResponse(web_dir / "index.html", media_type="text/html; charset=utf-8")
 
     @app.get("/static/{file_path:path}", include_in_schema=False)
     async def static_asset(file_path: str, request: Request):
-        await require_auth(request)
+        """Assets statiques du shell de connexion (F11) : servis sans authentification, comme
+        la page d'accueil ; ils ne contiennent aucune donnée d'investigation."""
+        # NB : pas de require_auth ici (F11) — les sous-ressources d'une navigation navigateur
+        # ne reprennent pas les headers Authorization posés par le JavaScript.
         candidate = (web_dir / file_path).resolve()
         if candidate != web_dir and web_dir not in candidate.parents:
             raise ApiError("not_found", "fichier inconnu", 404)

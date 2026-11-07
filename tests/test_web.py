@@ -42,22 +42,59 @@ async def test_web_serves_index_and_assets(engine):
             assert "pyproject" not in r.text
 
 
-async def test_web_requires_auth_in_server_mode(engine):
-    """T5.7 / EXEC-05 : en mode serveur, '/' et '/static/*' exigent le jeton comme l'API."""
+async def test_web_shell_public_but_api_protected_in_server_mode(engine):
+    """Audit F11 / T5.7 / EXEC-05 : en mode serveur, le shell de connexion ('/' et
+    '/static/*') est servi SANS jeton — un navigateur neuf charge la page et le formulaire
+    de connexion sans header Authorization (les sous-ressources ne les reprennent pas).
+    L'API, elle, reste protégée."""
     engine.settings.mode = "server"
     engine.settings.auth_token_hash = hashlib.sha256(b"secret").hexdigest()
     try:
         async with await client_for(engine) as client:
-            assert (await client.get("/")).status_code == 401
-            assert (await client.get("/static/app.js")).status_code == 401
-            assert (await client.get("/static/styles.css")).status_code == 401
-            h = {"Authorization": "Bearer secret"}
-            r = await client.get("/", headers=h)
+            # parcours réel d'un navigateur neuf : aucun header
+            r = await client.get("/")
             assert r.status_code == 200
             assert 'id="app"' in r.text
-            r = await client.get("/static/app.js", headers=h)
+            assert 'id="auth-dialog"' in r.text
+            r = await client.get("/static/app.js")
             assert r.status_code == 200
             assert "javascript" in r.headers["content-type"]
+            assert (await client.get("/static/styles.css")).status_code == 200
+            # l'API reste protégée sans jeton
+            assert (await client.get("/api/v1/investigations")).status_code == 401
+            assert (await client.get("/api/v1/health")).status_code == 401
+            # et accessible avec le jeton admin
+            h = {"Authorization": "Bearer secret"}
+            assert (await client.get("/api/v1/investigations", headers=h)).status_code == 200
+    finally:
+        engine.settings.mode = "desktop"
+        engine.settings.auth_token_hash = None
+
+
+async def test_web_login_exchanges_admin_token_for_revocable_session(engine):
+    """Audit F11 / CON-05 : POST /api/v1/auth/login échange le jeton admin contre une session
+    `sess_*` expirable et révocable ; la session ouvre l'API, le logout la révoque, et le
+    jeton admin statique reste valable."""
+    engine.settings.mode = "server"
+    engine.settings.auth_token_hash = hashlib.sha256(b"secret").hexdigest()
+    try:
+        async with await client_for(engine) as client:
+            r = await client.post("/api/v1/auth/login", json={"token": "mauvais"})
+            assert r.status_code == 401
+            r = await client.post("/api/v1/auth/login", json={"token": "secret"})
+            assert r.status_code == 200
+            sess = r.json()["session_token"]
+            assert sess.startswith("sess_")
+            h = {"Authorization": "Bearer " + sess}
+            assert (await client.get("/api/v1/investigations", headers=h)).status_code == 200
+            sessions = await client.get("/api/v1/auth/sessions", headers=h)
+            assert sessions.status_code == 200 and len(sessions.json()) >= 1
+            r = await client.post("/api/v1/auth/logout", headers=h)
+            assert r.status_code == 200 and r.json()["revoked"] is True
+            assert (await client.get("/api/v1/investigations", headers=h)).status_code == 401
+            # le jeton admin statique n'est pas révoqué par le logout d'une session
+            h = {"Authorization": "Bearer secret"}
+            assert (await client.get("/api/v1/investigations", headers=h)).status_code == 200
     finally:
         engine.settings.mode = "desktop"
         engine.settings.auth_token_hash = None

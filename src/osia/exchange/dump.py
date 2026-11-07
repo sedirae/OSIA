@@ -73,7 +73,8 @@ TABLES: dict[str, dict[str, Any]] = {
     },
     "external_ops": {
         "cols": ["id", "task_id", "investigation_id", "kind", "target", "is_paid", "cost_estimated_cents", "state", "reservation_id", "result", "error", "created_at", "updated_at"],
-        "refs": {"investigation_id": "investigations", "task_id": "tasks"},
+        # F10 : reservation_id est une vraie FK (remappée comme les autres en mode "add")
+        "refs": {"investigation_id": "investigations", "task_id": "tasks", "reservation_id": "reservations"},
         "pk": "id",
     },
     "reservations": {
@@ -121,6 +122,71 @@ DATE_COLS = {
     "relations": {"valid_from", "valid_to"},
 }
 
+# Contrat des références EMBARQUÉES dans les colonnes JSONB (audit F10, T7.1/T7.6) : remappées
+# comme les colonnes de refs en mode "add". "ref_list" = tableau d'identifiants d'une même table ;
+# "deep" = arbre quelconque dont toute chaîne résolvant sans ambiguïté vers un identifiant importé
+# est remappée (sinon elle est laissée telle quelle et signalée dans report["ambiguous_refs"]).
+JSON_REF_CONTRACT: dict[str, dict[str, dict[str, str]]] = {
+    "relations": {"proof_ids": {"kind": "ref_list", "ref_table": "proof_refs"}},
+    "assertions": {
+        "proof_ids": {"kind": "ref_list", "ref_table": "proof_refs"},
+        "contradicted_by": {"kind": "ref_list", "ref_table": "assertions"},
+    },
+    "decisions": {"payload": {"kind": "deep"}},
+    "tasks": {"payload": {"kind": "deep"}},
+    "external_ops": {"result": {"kind": "deep"}},
+    "events": {"payload": {"kind": "deep"}},
+}
+
+# Forme des identifiants OSIA (new_id : prefixe 3 lettres + 16 caractères hex).
+_ID_LIKE = re.compile(r"^[a-z]{3}_[0-9a-f]{16}$")
+
+
+def _remap_ref_list(values: Any, ref_table: str, id_map: dict[str, dict[str, str]], *, table: str, row_id: Any, col: str, report: dict[str, Any]) -> list[Any]:
+    out: list[Any] = []
+    for v in values or []:
+        if not isinstance(v, str):
+            out.append(v)
+            continue
+        mapped = id_map.get(ref_table, {}).get(v)
+        if mapped is None:
+            report.setdefault("dangling_refs", []).append({"table": table, "id": row_id, "column": col, "missing": v, "ref_table": ref_table})
+            out.append(v)
+        else:
+            out.append(mapped)
+    return out
+
+
+def _remap_json_deep(value: Any, id_map: dict[str, dict[str, str]], *, table: str, row_id: Any, col: str, report: dict[str, Any]) -> Any:
+    """Remappe récursivement toute chaîne qui est un identifiant importé (mode add, F10)."""
+
+    def walk(v: Any) -> Any:
+        if isinstance(v, str):
+            hits = [t for t in IMPORT_ORDER if not TABLES[t].get("serial") and t != "proof_files" and v in id_map.get(t, {})]
+            if len(hits) == 1:
+                return id_map[hits[0]][v]
+            if len(hits) > 1:
+                report.setdefault("ambiguous_refs", []).append({"table": table, "id": row_id, "column": col, "value": v, "tables": sorted(hits)})
+            return v
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        return v
+
+    return walk(value)
+
+
+def _iter_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for x in value:
+            yield from _iter_strings(x)
+    elif isinstance(value, dict):
+        for x in value.values():
+            yield from _iter_strings(x)
+
 
 def jsonable(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
@@ -167,12 +233,42 @@ async def dump_investigation(
 ) -> dict[str, list[dict[str, Any]]]:
     """Extrait toutes les tables liees a une investigation (CON-14 §1.3).
 
-    branch_ids restreint branches/tasks/assertions/relations/events aux branches choisies
-    (les entites du graphe restent celles de l'investigation). exclusions retire des tables
-    techniques/financieres (T7.4)."""
+    branch_ids restreint l'export a la FERMETURE du périmètre choisi (audit F12, T7.4/T7.8) :
+    branches/tasks/assertions/relations/events/reservations des branches choisies, décisions
+    portant sur ces assertions/relations, et preuves (proof_refs + proof_files) référencées par
+    ces assertions/relations. Les entites, identifiants et match_proposals restent ceux de
+    l'investigation (pas de branche propre). exclusions retire des tables techniques/financieres."""
     exclusions = exclusions or set()
     payload: dict[str, list[dict[str, Any]]] = {}
     async with pool.acquire() as conn:
+        # Périmètre branch_ids : identifiants des assertions/relations retenues, utilisés pour
+        # la fermeture des décisions et des preuves.
+        sel_assertions: list[str] = []
+        sel_relations: list[str] = []
+        if branch_ids:
+            sel_assertions = [
+                r["id"]
+                for r in await conn.fetch(
+                    "SELECT id FROM assertions WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2))",
+                    investigation_id, branch_ids,
+                )
+            ]
+            sel_relations = [
+                r["id"]
+                for r in await conn.fetch(
+                    "SELECT id FROM relations WHERE investigation_id = $1 AND (branch_id IS NULL OR branch_id = ANY($2))",
+                    investigation_id, branch_ids,
+                )
+            ]
+        proof_scope_sql = (
+            "SELECT DISTINCT p2.id FROM proof_refs p2 WHERE p2.investigation_id = $1 AND p2.id IN ("
+            "SELECT jsonb_array_elements_text(a.proof_ids) FROM assertions a "
+            "WHERE a.investigation_id = $1 AND (a.branch_id IS NULL OR a.branch_id = ANY($2)) "
+            "UNION "
+            "SELECT jsonb_array_elements_text(r.proof_ids) FROM relations r "
+            "WHERE r.investigation_id = $1 AND (r.branch_id IS NULL OR r.branch_id = ANY($2))"
+            ")"
+        )
         for table in IMPORT_ORDER:
             if table in exclusions:
                 payload[table] = []
@@ -180,10 +276,34 @@ async def dump_investigation(
             if table == "investigations":
                 rows = await conn.fetch("SELECT * FROM investigations WHERE id = $1", investigation_id)
             elif table == "proof_files":
+                if branch_ids:
+                    rows = await conn.fetch(
+                        "SELECT DISTINCT pf.* FROM proof_files pf JOIN proof_refs pr ON pr.proof_sha256 = pf.sha256 "
+                        f"WHERE pr.id IN ({proof_scope_sql}) ORDER BY pf.sha256",
+                        investigation_id, branch_ids,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        "SELECT DISTINCT pf.* FROM proof_files pf JOIN proof_refs pr ON pr.proof_sha256 = pf.sha256 "
+                        "WHERE pr.investigation_id = $1 ORDER BY pf.sha256",
+                        investigation_id,
+                    )
+            elif table == "proof_refs" and branch_ids:
                 rows = await conn.fetch(
-                    "SELECT DISTINCT pf.* FROM proof_files pf JOIN proof_refs pr ON pr.proof_sha256 = pf.sha256 "
-                    "WHERE pr.investigation_id = $1 ORDER BY pf.sha256",
-                    investigation_id,
+                    f"SELECT * FROM proof_refs WHERE id IN ({proof_scope_sql}) ORDER BY fetched_at",
+                    investigation_id, branch_ids,
+                )
+            elif branch_ids and table == "decisions":
+                # Fermeture (F12) : décisions dont la cible est dans le périmètre (assertion ou
+                # relation retenue) ; les cibles entity/match_proposal restent globales.
+                rows = await conn.fetch(
+                    "SELECT * FROM decisions WHERE investigation_id = $1 "
+                    "AND (assertion_id IS NULL OR assertion_id = ANY($2)) "
+                    "AND (target_type IS NULL OR target_type IN ('entity', 'match_proposal') "
+                    "     OR (target_type = 'assertion' AND target_id = ANY($2)) "
+                    "     OR (target_type = 'relation' AND target_id = ANY($3))) "
+                    "ORDER BY created_at",
+                    investigation_id, sel_assertions or ["__none__"], sel_relations or ["__none__"],
                 )
             elif branch_ids and table in ("branches",):
                 ids = branch_ids
@@ -345,16 +465,34 @@ async def import_payload(
                             if mapped is None:
                                 report.setdefault("dangling_refs", []).append({"table": table, "id": new_row.get(pk), "column": "target_id", "missing": new_row["target_id"], "ref_table": rt})
                             new_row["target_id"] = mapped
+                    # F10 : remap des références embarquées dans les colonnes JSONB (mode add)
+                    if mode == "add":
+                        for col, contract in JSON_REF_CONTRACT.get(table, {}).items():
+                            v = new_row.get(col)
+                            if v is None:
+                                continue
+                            if contract["kind"] == "ref_list":
+                                new_row[col] = _remap_ref_list(v, contract["ref_table"], id_map, table=table, row_id=row.get(pk), col=col, report=report)
+                            else:
+                                new_row[col] = _remap_json_deep(v, id_map, table=table, row_id=row.get(pk), col=col, report=report)
                     if table == "investigations" and new_row.get("state") == "running":
                         new_row["state"] = "suspended"
                         report["normalized_states"].append(new_row[pk])
+                    if table == "reservations" and new_row.get("state") == "reserved":
+                        # Règle explicite (audit F10) : une réservation importée non résolue ne
+                        # doit pas peser sur les plafonds financiers locaux (elle ne sera jamais
+                        # consommée ici) ; l'état d'origine reste dans l'archive exportée.
+                        new_row["state"] = "released"
+                        report.setdefault("released_reservations", []).append(new_row.get(pk))
                     if new_row.get("idempotency_key"):
                         clash = await conn.fetchrow(
                             f"SELECT 1 FROM {table} WHERE idempotency_key = $1 AND {pk} <> $2",
                             new_row["idempotency_key"], new_row.get(pk) or "",
                         )
                         if clash is not None:
-                            new_row["idempotency_key"] = None
+                            # F10 : reservations.idempotency_key est NOT NULL -> on régénère une
+                            # clé fraîche plutôt que NULL (sinon l'insert échoue en mode add).
+                            new_row["idempotency_key"] = new_id("key") if table == "reservations" else None
                             report.setdefault("regenerated_keys", []).append({"table": table, "id": new_row.get(pk)})
                     values = []
                     for c in cols:
@@ -384,7 +522,79 @@ async def import_payload(
                 report["skipped"][table] = skipped
             for table, pk_col, pk_val, col, mapped in deferred_updates:
                 await conn.execute(f"UPDATE {table} SET {col} = $1 WHERE {pk_col} = $2", mapped, pk_val)
+            # F10 / T7.6 : vérification d'intégrité référentielle métier APRÈS import — toute
+            # référence (colonne FK, target_ref ou embarquée dans le JSON) doit résoudre en base.
+            dangling = await _verify_refs(conn, payload, mode=mode, id_map=id_map)
+            if dangling:
+                report.setdefault("dangling_refs", []).extend(dangling)
+            report["integrity"] = "dangling" if report.get("dangling_refs") else "ok"
     return report
+
+
+_ID_TABLES = [t for t in IMPORT_ORDER if not TABLES[t].get("serial") and t != "proof_files"]
+
+
+async def _id_exists_anywhere(conn: asyncpg.Connection, value: str) -> bool:
+    for t in _ID_TABLES:
+        if await conn.fetchval(f"SELECT 1 FROM {t} WHERE {TABLES[t]['pk']} = $1", value):
+            return True
+    return False
+
+
+async def _verify_refs(
+    conn: asyncpg.Connection,
+    payload: dict[str, list[dict[str, Any]]],
+    *,
+    mode: str,
+    id_map: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Vérifie après import que chaque référence du payload résout vers une ligne insérée
+    (ou préexistante en mode merge). Retourne les références rompues."""
+    dangling: list[dict[str, Any]] = []
+
+    def resolve(ref_table: str, value: Any) -> Any:
+        if value is None:
+            return None
+        if mode == "add" and not TABLES[ref_table].get("serial") and ref_table != "proof_files":
+            return id_map.get(ref_table, {}).get(value)
+        return value
+
+    async def check(ref_table: str, target: Any, *, table: str, rid: Any, col: str, missing: Any) -> None:
+        if target is None:
+            return
+        ok = await conn.fetchval(f"SELECT 1 FROM {ref_table} WHERE {TABLES[ref_table]['pk']} = $1", target)
+        if not ok:
+            dangling.append({"table": table, "id": rid, "column": col, "missing": missing, "ref_table": ref_table})
+
+    for table in IMPORT_ORDER:
+        spec = TABLES[table]
+        pk = spec["pk"]
+        target_ref = spec.get("target_ref", {})
+        for row in payload.get(table, []):
+            rid = row.get(pk)
+            for col, ref_table in spec["refs"].items():
+                await check(ref_table, resolve(ref_table, row.get(col)), table=table, rid=rid, col=col, missing=row.get(col))
+            if row.get("target_id") is not None:
+                rt = target_ref.get(row.get("target_type"))
+                if rt:
+                    await check(rt, resolve(rt, row["target_id"]), table=table, rid=rid, col="target_id", missing=row["target_id"])
+            for col, contract in JSON_REF_CONTRACT.get(table, {}).items():
+                v = row.get(col)
+                if v is None:
+                    continue
+                if contract["kind"] == "ref_list":
+                    for item in v or []:
+                        await check(contract["ref_table"], resolve(contract["ref_table"], item), table=table, rid=rid, col=col, missing=item)
+                else:
+                    for s in _iter_strings(v):
+                        if not _ID_LIKE.match(s):
+                            continue
+                        hits = [t for t in _ID_TABLES if s in id_map.get(t, {})] if mode == "add" else []
+                        if len(hits) == 1:
+                            await check(hits[0], id_map[hits[0]][s], table=table, rid=rid, col=col, missing=s)
+                        elif not hits and not await _id_exists_anywhere(conn, s):
+                            dangling.append({"table": table, "id": rid, "column": col, "missing": s, "ref_table": "?"})
+    return dangling
 
 
 class ImportConflictError(Exception):
