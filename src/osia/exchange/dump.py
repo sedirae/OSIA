@@ -224,6 +224,25 @@ def _norm_val(value: Any) -> Any:
     return value
 
 
+def _parse_dt(value: Any) -> Optional[datetime]:
+    """Parse une valeur horodatement serialisee en ISO 8601, sinon None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    """Comparaison de deux valeurs : les horodatages ISO 8601 sont compares comme instants
+    (to_jsonb rend la session dans le fuseau local, l'archive stocke en UTC)."""
+    dl, dr = _parse_dt(left), _parse_dt(right)
+    if dl is not None and dr is not None:
+        return dl == dr
+    return json.dumps(_norm_val(left), sort_keys=True, default=str) == json.dumps(_norm_val(right), sort_keys=True, default=str)
+
+
 async def detect_conflicts(
     conn: asyncpg.Connection,
     payload: dict[str, list[dict[str, Any]]],
@@ -242,11 +261,7 @@ async def detect_conflicts(
             if existing is None:
                 continue
             left = json.loads(existing["j"])
-            same = all(
-                json.dumps(_norm_val(left.get(k)), sort_keys=True, default=str)
-                == json.dumps(_norm_val(row.get(k)), sort_keys=True, default=str)
-                for k in spec["cols"]
-            )
+            same = all(_same_value(left.get(k), row.get(k)) for k in spec["cols"])
             conflicts.append({"table": table, "id": row[pk], "status": "identical" if same else "divergent"})
     return [c for c in conflicts if c["status"] == "divergent"]
 
