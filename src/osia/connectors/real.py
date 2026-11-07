@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from html.parser import HTMLParser
 from typing import Any
 
+from ..security.isolation import run_isolated, run_isolated_sync
 from .base import ConnectorManifest, FetchRequest, FetchResult, TrustLevel
 from .http import HttpConnector, build_url
 
@@ -40,12 +42,20 @@ def extract_text_from_html(html: str) -> str:
 
 
 def extract_text_from_pdf(data: bytes) -> str:
-    """Extraction texte d'un PDF textuel (B3, V1.2)."""
-    from pypdf import PdfReader
-    import io
+    """Extraction texte d'un PDF textuel (B3, V1.2) en sous-processus isolé (rlimits, T5.2) :
+    le parsing PDF n'a jamais lieu dans le processus du moteur (audit issue #17 F02)."""
+    proc = run_isolated_sync([sys.executable, "-m", "osia.security.pdftool"], stdin_data=data)
+    if proc.returncode != 0:
+        raise ValueError("extraction PDF isolée échouée (document illisible ou limite atteinte)")
+    return proc.stdout.decode("utf-8", errors="replace")
 
-    reader = PdfReader(io.BytesIO(data))
-    return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+async def extract_text_from_pdf_isolated(data: bytes) -> str:
+    """Variante async (chemin produit) : même isolation, sans bloquer la boucle d'événements."""
+    rc, out, _err = await run_isolated([sys.executable, "-m", "osia.security.pdftool"], stdin_data=data)
+    if rc != 0:
+        raise ValueError("extraction PDF isolée échouée (document illisible ou limite atteinte)")
+    return out.decode("utf-8", errors="replace")
 
 
 def _gleif_record(rec: Any) -> dict:
@@ -268,7 +278,7 @@ class WebUrlConnector(HttpConnector):
         status, headers, body = await self._get(url)
         media = headers.get("content-type", "application/octet-stream").split(";")[0].strip().lower()
         if media == "application/pdf" or url.lower().endswith(".pdf"):
-            text = extract_text_from_pdf(body)
+            text = await extract_text_from_pdf_isolated(body)
             return self._result(query=url, url=url, status=status, payload={"url": url, "media_type": "application/pdf", "text": text}, media_type="application/pdf", extracted_text=text)
         text = body.decode("utf-8", errors="replace")
         extracted = extract_text_from_html(text) if "html" in media else text

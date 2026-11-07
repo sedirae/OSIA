@@ -60,6 +60,30 @@ class NetworkPolicy:
 Resolver = Callable[[str, int], Awaitable[list[tuple]]]
 
 
+@dataclass
+class PinnedTarget:
+    """Adresses validées par `resolve_and_check`, à épingler au transport HTTP (anti-TOCTOU DNS :
+    le transport ne résout plus le nom, il se connecte aux seules IPs contrôlées, F02)."""
+
+    host: str
+    port: int
+    ips: list[str]
+
+
+@dataclass
+class RequestContext:
+    """Contexte transmis au fetch quand il déclare `accepts_ctx = True` (F02) :
+
+    - `pinned` : IPs validées à utiliser pour la connexion (SNI/Host conservés) ;
+    - `max_bytes` : plafond de lecture streamée de la réponse (y compris décompressée) ;
+    - `same_origin` : False sur redirection inter-origines -> le fetch doit supprimer les
+      credentials (Authorization, Cookie) de sa requête (T8.8)."""
+
+    pinned: Optional[PinnedTarget]
+    max_bytes: int
+    same_origin: bool
+
+
 class NetworkGuard:
     """Garde-fou réseau central (T5.4) : tout accès sortant des connecteurs passe par lui.
 
@@ -154,21 +178,44 @@ class NetworkGuard:
                 await asyncio.sleep(wait)
             self._last_call[host] = time.monotonic()
 
+    @staticmethod
+    def _origin_of(url: str) -> tuple[str, str, int]:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if scheme == "https" else 80)
+        return scheme, host, port
+
     async def guarded_request(
         self,
-        fetch: Callable[[str], Awaitable[tuple[int, dict, bytes]]],
+        fetch: Callable[..., Awaitable[tuple[int, dict, bytes]]],
         url: str,
     ) -> tuple[int, dict, bytes]:
         """Exécute une requête HTTP via `fetch(url)` en appliquant la politique complète :
         check URL, résolution DNS anti-SSRF, rate limit, redirections re-vérifiées et plafonnées,
         taille plafonnée. `fetch` doit faire UNE requête sans suivre les redirections et retourner
-        (status, headers, body)."""
+        (status, headers, body).
+
+        Si `fetch` déclare `accepts_ctx = True`, il reçoit en plus `ctx=RequestContext(...)` :
+        les IPs validées à épingler au transport (le résultat de resolve_and_check n'est plus
+        abandonné — F02), le plafond de lecture, et `same_origin=False` sur redirection
+        inter-origines pour y supprimer les credentials."""
+        original_origin = self._origin_of(url)
         current = url
         for _ in range(self.policy.max_redirects + 1):
             host = self.check_url(current)
-            await self.resolve_and_check(host, urllib.parse.urlsplit(current).port or (443 if current.startswith("https") else 80))
+            port = urllib.parse.urlsplit(current).port or (443 if current.startswith("https") else 80)
+            ips = await self.resolve_and_check(host, port)
             await self._rate_limit(host)
-            status, headers, body = await asyncio.wait_for(fetch(current), timeout=self.policy.timeout_seconds)
+            ctx = RequestContext(
+                pinned=PinnedTarget(host=host, port=port, ips=ips),
+                max_bytes=self.policy.max_bytes,
+                same_origin=self._origin_of(current) == original_origin,
+            )
+            if getattr(fetch, "accepts_ctx", False):
+                status, headers, body = await asyncio.wait_for(fetch(current, ctx=ctx), timeout=self.policy.timeout_seconds)
+            else:
+                status, headers, body = await asyncio.wait_for(fetch(current), timeout=self.policy.timeout_seconds)
             if len(body) > self.policy.max_bytes:
                 self._log_block("taille_depassee", host)
                 raise NetworkDeny("taille_depassee", host)

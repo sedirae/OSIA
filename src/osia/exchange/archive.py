@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import pathlib
+import re
 import zipfile
 from typing import Any, Optional
 
@@ -19,6 +20,18 @@ ENC_PREFIX = "enc/"
 MANIFEST = "manifest.json"
 META = "meta.json"
 
+# Plafonds anti zip-bomb et anti écriture hors stockage (audit issue #17 F01) : vérifiés AVANT
+# toute lecture/écriture, complétés par des lectures bornées (la taille déclarée d'une entrée ZIP
+# peut mentir).
+MAX_ZIP_ENTRIES = 10_000
+MAX_ENTRY_BYTES = 100 * 1024 * 1024  # 100 Mo décompressés par entrée
+MAX_TOTAL_BYTES = 512 * 1024 * 1024  # 512 Mo décompressés au total
+MAX_MANIFEST_BYTES = 10 * 1024 * 1024
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TABLE_RE = re.compile(r"^[a-z_]+$")
+_ENC_RE = re.compile(r"^enc/[0-9]{6}\.enc$")
+
 
 class ArchiveError(Exception):
     """Archive illisible, version non supportee ou integrite non verifiee (T7.2/T7.7)."""
@@ -26,6 +39,71 @@ class ArchiveError(Exception):
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def is_valid_sha256(name: Any) -> bool:
+    """Un digest de preuve n'est utilisable comme composante de chemin que s'il fait 64 hex."""
+    return isinstance(name, str) and bool(_SHA256_RE.match(name))
+
+
+def _safe_entry_name(name: Any) -> bool:
+    """Nom d'entrée ZIP sûr : chaîne non vide, chemin relatif POSIX, sans '..' ni antislash."""
+    if not isinstance(name, str) or not name or "\\" in name:
+        return False
+    p = pathlib.PurePosixPath(name)
+    if p.is_absolute():
+        return False
+    return all(part != ".." for part in p.parts)
+
+
+def _validate_zip_layout(zf: zipfile.ZipFile) -> None:
+    """Rejette l'archive avant toute lecture : noms non sûrs, liens symboliques, doublons,
+    plafonds de volume (nombre d'entrées, taille déclarée par entrée et au total)."""
+    infos = zf.infolist()
+    if len(infos) > MAX_ZIP_ENTRIES:
+        raise ArchiveError(f"archive trop volumineuse: {len(infos)} entrées (max {MAX_ZIP_ENTRIES})")
+    seen: set[str] = set()
+    total = 0
+    for info in infos:
+        name = info.filename
+        if not _safe_entry_name(name):
+            raise ArchiveError(f"nom d'entrée non sûr refusé: {name!r}")
+        if (info.external_attr >> 16) & 0o170000 == 0o120000:
+            raise ArchiveError(f"lien symbolique refusé: {name!r}")
+        if name in seen:
+            raise ArchiveError(f"entrée dupliquée refusée: {name!r}")
+        seen.add(name)
+        if info.file_size > MAX_ENTRY_BYTES:
+            raise ArchiveError(f"entrée trop volumineuse: {name!r} ({info.file_size} o, max {MAX_ENTRY_BYTES})")
+        total += info.file_size
+        if total > MAX_TOTAL_BYTES:
+            raise ArchiveError(f"volume décompressé total dépassé (max {MAX_TOTAL_BYTES} o)")
+
+
+def _bounded_read(zf: zipfile.ZipFile, name: str, max_bytes: int) -> bytes:
+    """Lecture bornée d'une entrée ZIP : au plus max_bytes+1 octets lus (la taille déclarée peut
+    mentir, ex. zip bomb), puis rejet si le plafond est dépassé."""
+    with zf.open(name) as fh:
+        data = fh.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ArchiveError(f"entrée dépassant le plafond décompressé ({max_bytes} o): {name!r}")
+    return data
+
+
+def _validate_manifest_path(path: Any) -> None:
+    """Schéma strict des chemins du manifeste (F01) : `data/<table>.json(l)` ou
+    `proofs/<sha256>` avec un digest 64 hex — jamais de chemin absolu ni de traversée."""
+    if not _safe_entry_name(path):
+        raise ArchiveError(f"chemin de manifeste non sûr: {path!r}")
+    if path.startswith(PROOF_PREFIX):
+        if not is_valid_sha256(path[len(PROOF_PREFIX):]):
+            raise ArchiveError(f"nom de preuve invalide (64 hex attendus): {path!r}")
+    elif path.startswith(DATA_PREFIX):
+        rest = path[len(DATA_PREFIX):]
+        if "/" in rest or not (rest.endswith(".jsonl") or rest.endswith(".json")):
+            raise ArchiveError(f"chemin de données invalide: {path!r}")
+    else:
+        raise ArchiveError(f"préfixe de chemin inconnu: {path!r}")
 
 
 def _json_bytes(obj: Any) -> bytes:
@@ -71,6 +149,12 @@ def write_archive(
     (sans aucun nom interne) + manifest.json.enc + enc/<n>.enc (CON-15, T7.3)."""
     crypto = ArchiveCrypto(passphrase)
     counts = {t: len(rows) for t, rows in payload.items()}
+    for table in payload:
+        if not _TABLE_RE.match(table):
+            raise ArchiveError(f"nom de table invalide: {table!r}")
+    for sha256 in proofs:
+        if not is_valid_sha256(sha256):
+            raise ArchiveError(f"clé de preuve invalide (64 hex attendus): {sha256!r}")
     entries: list[tuple[str, bytes]] = []
     for table, rows in payload.items():
         name = "investigation.json" if table == "investigations" else f"{table}.jsonl"
@@ -149,9 +233,10 @@ def read_meta_and_manifest(src, passphrase: Optional[str] = None) -> tuple[dict,
     """Lit meta.json/manifest.json (clair ou dechiffre) avec verification d'integrite (T7.2)."""
     crypto = ArchiveCrypto(passphrase)
     zf = _read_zip(src)
+    _validate_zip_layout(zf)
     names = set(zf.namelist())
     if MANIFEST in names and META not in names:
-        manifest = _load_json(zf.read(MANIFEST), MANIFEST)
+        manifest = _load_json(_bounded_read(zf, MANIFEST, MAX_MANIFEST_BYTES), MANIFEST)
         if manifest.get("format") != FORMAT:
             raise ArchiveError("format inconnu (attendu: osia-archive)")
         if str(manifest.get("format_version")) != FORMAT_VERSION:
@@ -161,7 +246,7 @@ def read_meta_and_manifest(src, passphrase: Optional[str] = None) -> tuple[dict,
         _verify_files(zf, manifest["files"], encrypted=False)
         return {}, manifest, zf, crypto
     if META in names:
-        meta = _load_json(zf.read(META), META)
+        meta = _load_json(_bounded_read(zf, META, MAX_MANIFEST_BYTES), META)
         if meta.get("format") != FORMAT:
             raise ArchiveError("format inconnu (attendu: osia-archive)")
         if str(meta.get("format_version")) != FORMAT_VERSION:
@@ -172,7 +257,9 @@ def read_meta_and_manifest(src, passphrase: Optional[str] = None) -> tuple[dict,
             manifest_enc = meta["manifest_enc"]
         except (KeyError, ValueError, TypeError) as exc:
             raise ArchiveError("meta.json invalide : parametres de chiffrement absents ou illisibles") from exc
-        manifest = _load_json(crypto.decrypt(nonce, zf.read(manifest_enc), key), "manifeste chiffre")
+        if not isinstance(manifest_enc, str) or (manifest_enc != "manifest.json.enc" and not _ENC_RE.match(manifest_enc)) or manifest_enc not in names:
+            raise ArchiveError("meta.json invalide : manifeste chiffré absent ou nom non sûr")
+        manifest = _load_json(crypto.decrypt(nonce, _bounded_read(zf, manifest_enc, MAX_ENTRY_BYTES), key), "manifeste chiffre")
         if not isinstance(manifest.get("files"), list):
             raise ArchiveError("manifeste invalide : files absent")
         _verify_files(zf, manifest["files"], encrypted=True, key=key, crypto=crypto)
@@ -181,38 +268,77 @@ def read_meta_and_manifest(src, passphrase: Optional[str] = None) -> tuple[dict,
 
 
 def _verify_files(zf: zipfile.ZipFile, files: list[dict[str, Any]], *, encrypted: bool, key: bytes | None = None, crypto: ArchiveCrypto | None = None) -> None:
+    """Vérification d'intégrité stricte (T7.2, F01) : schéma des chemins, digest 64 hex,
+    lecture bornée de chaque entrée, et pour une preuve le nom de fichier DOIT être le digest
+    de son contenu (un nom trompeur est rejeté même si le manifeste est cohérent)."""
     errors: list[str] = []
     names = set(zf.namelist())
+    total = 0
     for entry in files:
-        target = entry["enc"] if encrypted else entry["path"]
-        if target not in names:
-            errors.append(f"fichier absent: {entry['path']}")
+        path = entry.get("path")
+        try:
+            _validate_manifest_path(path)
+        except ArchiveError as exc:
+            errors.append(str(exc))
             continue
-        raw = zf.read(target)
+        if not is_valid_sha256(entry.get("sha256")):
+            errors.append(f"empreinte invalide (64 hex attendus): {path}")
+            continue
+        target = entry["enc"] if encrypted else path
+        if encrypted and (not isinstance(target, str) or not _ENC_RE.match(target)):
+            errors.append(f"nom d'entrée chiffrée non sûr: {target!r}")
+            continue
+        if target not in names:
+            errors.append(f"fichier absent: {path}")
+            continue
+        try:
+            raw = _bounded_read(zf, target, MAX_ENTRY_BYTES)
+        except ArchiveError as exc:
+            errors.append(str(exc))
+            continue
+        total += len(raw)
+        if total > MAX_TOTAL_BYTES:
+            raise ArchiveError(f"volume décompressé total dépassé (max {MAX_TOTAL_BYTES} o)")
         if encrypted:
             try:
                 raw = crypto.decrypt(base64.b64decode(entry["nonce_b64"]), raw, key)
             except CryptoError as exc:
-                errors.append(f"dechiffrement echoue: {entry['path']} ({exc})")
+                errors.append(f"dechiffrement echoue: {path} ({exc})")
                 continue
         digest = sha256_bytes(raw)
         if digest != entry["sha256"]:
-            errors.append(f"empreinte SHA-256 invalide: {entry['path']}")
+            errors.append(f"empreinte SHA-256 invalide: {path}")
+            continue
+        if path.startswith(PROOF_PREFIX) and path[len(PROOF_PREFIX):] != digest:
+            errors.append(f"nom de preuve ne correspond pas à son empreinte: {path}")
     if errors:
         raise ArchiveError("integrite non verifiee: " + "; ".join(errors))
 
 
 def extract_payload(zf: zipfile.ZipFile, manifest: dict, *, encrypted: bool, key: bytes | None = None, crypto: ArchiveCrypto | None = None) -> tuple[dict[str, list[dict[str, Any]]], dict[str, bytes]]:
-    """Retourne (payload par table, preuves sha256 -> contenu) apres verification d'integrite."""
+    """Retourne (payload par table, preuves sha256 -> contenu) apres verification d'integrite.
+
+    F01 : chaque chemin est re-validé ici (défense en profondeur), les lectures sont bornées,
+    le volume total est plafonné, et une preuve n'est indexée que par un nom 64 hex validé —
+    jamais par un chemin fourni brut par l'archive."""
     payload: dict[str, list[dict[str, Any]]] = {}
     proofs: dict[str, bytes] = {}
+    total = 0
     for entry in manifest["files"]:
         path = entry["path"]
-        raw = zf.read(entry["enc"] if encrypted else path)
+        _validate_manifest_path(path)
+        target = entry["enc"] if encrypted else path
+        raw = _bounded_read(zf, target, MAX_ENTRY_BYTES)
+        total += len(raw)
+        if total > MAX_TOTAL_BYTES:
+            raise ArchiveError(f"volume décompressé total dépassé (max {MAX_TOTAL_BYTES} o)")
         if encrypted:
             raw = crypto.decrypt(base64.b64decode(entry["nonce_b64"]), raw, key)
         if path.startswith(PROOF_PREFIX):
-            proofs[path[len(PROOF_PREFIX):]] = raw
+            name = path[len(PROOF_PREFIX):]
+            if not is_valid_sha256(name):
+                raise ArchiveError(f"nom de preuve invalide (64 hex attendus): {path!r}")
+            proofs[name] = raw
             continue
         table = path[len(DATA_PREFIX):].removesuffix(".jsonl").removesuffix(".json")
         if table == "investigation":
