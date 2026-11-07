@@ -78,6 +78,13 @@ async def test_ping_models_non_facture():
     assert capture["url"] == "https://api.mistral.ai/v1/models"  # GET /models : pas de prompt métier
 
 
+async def test_mistral_content_null_rejetee_comme_sortie_non_json():
+    """T8.6 : un `content` null (ou non str) est une sortie non JSON -> AIAdapterError, pas un TypeError brut."""
+    ad = MistralCloudAdapter(api_key="sk-test", fetch_fn=fake_post(b'{"choices":[{"message":{"content":null}}]}'))
+    with pytest.raises(AIAdapterError):
+        await ad.complete("planning", "p", {}, PlanProposal)
+
+
 async def test_local_adapter_host_local_hors_guard_et_non_payant():
     ad = LocalOpenAIAdapter(base_url="http://127.0.0.1:11434/v1", fetch_fn=fake_post(chat_completion({"conclusion": "ok", "support": "documenté"})))
     assert ad.is_local is True
@@ -86,6 +93,16 @@ async def test_local_adapter_host_local_hors_guard_et_non_payant():
     out = await ad.complete("synthesis", "p", {}, Synthesis)
     assert out.conclusion == "ok"
     assert ad.model == "ministral-3-8b"  # V1.3 : premier candidat local
+
+
+def test_local_adapter_host_externe_soumis_au_guard():
+    """T5.4 : un endpoint « local » pointant vers un host NON local reste soumis au guard
+    (is_local basé sur le host du base_url) et son domaine doit être autorisé explicitement."""
+    ad = LocalOpenAIAdapter(base_url="http://llm.example.com:8000/v1")
+    assert ad.is_local is False  # le guard n'est PAS retiré : posé par engine.setup() (T5.4)
+    settings = Settings(ai_local_base_url="http://llm.example.com:8000/v1")
+    _, _, domains = build_ai_adapters(settings, None)
+    assert "llm.example.com" in domains  # domaine à autoriser dans l'allowlist (jamais implicite)
 
 
 # ---------- Construction selon la configuration (D2 §4.2) ----------
@@ -199,3 +216,10 @@ async def test_api_ai_providers_fallback_test(engine):
 
         r = await client.post("/api/v1/ai/test", json={"provider_key": "inconnu"})
         assert r.status_code == 404
+
+
+def test_cli_ai_fallback_exige_flag_explicite():
+    """T8.9/V1.3 : `osia ai fallback` sans flag n'autorise RIEN implicitement (aucun Engine créé)."""
+    from osia.cli import main
+
+    assert main(["ai", "fallback"]) == 2
