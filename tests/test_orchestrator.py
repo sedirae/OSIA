@@ -57,7 +57,7 @@ async def test_vertical_run_objective_reached(engine):
     engine.broker.adapters["simulated"].scripted = {
         "planning": {"sub_objectives": ["so1"], "source_queries": ["requete-1"]},
         "extraction": {"entities": [{"kind": "entreprise", "name": "ACME", "identifiers": {"siren": "123456789"}}], "relations": []},
-        "synthesis": {"conclusion": "ACME existe", "support": "documenté", "decisive_sources": ["https://ex.test/1"], "objective_sufficiently_supported": True},
+        "synthesis": {"conclusion": "ACME existe", "support": "documenté", "decisive_sources": ["https://example.test/simulated?q=requete-1"], "objective_sufficiently_supported": True},
     }
     await engine.start()
     inv = await make_investigation(engine, title="verticale", objective="Vérifier ACME")

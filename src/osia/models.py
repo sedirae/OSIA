@@ -123,3 +123,93 @@ class PolicyDeny(Exception):
         super().__init__(reason)
         self.reason = reason
         self.scope = scope
+
+
+class SupportLevel(str, enum.Enum):
+    """Statut d'etayage documentaire (C6) : distinct de la decision humaine (T6.7, CON-10)."""
+
+    DOCUMENTE = "documente"
+    CORROBORE = "corrobore"
+    A_CONFIRMER = "a_confirmer"
+    CONTRADICTOIRE = "contradictoire"
+    NON_ETABLI = "non_etabli"
+
+
+class HumanDecision(str, enum.Enum):
+    UNEXAMINED = "unexamined"
+    VALIDATED = "validated"
+    REJECTED = "rejected"
+
+
+class ClaimNature(str, enum.Enum):
+    """Natures T6.7 : fait etabli, information rapportee, indice, hypothese, conclusion analytique."""
+
+    FAIT_ETABLI = "fait_etabli"
+    INFORMATION_RAPPORTEE = "information_rapportee"
+    INDICE = "indice"
+    HYPOTHESE = "hypothese"
+    CONCLUSION_ANALYTIQUE = "conclusion_analytique"
+
+
+class ConfidenceLevel(str, enum.Enum):
+    HAUTE = "haute"
+    MOYENNE = "moyenne"
+    FAIBLE = "faible"
+    INCONNUE = "inconnue"
+
+
+CONFIDENCE_DIMENSIONS = (
+    "fiabilite_source",
+    "qualite_extraction",
+    "solidite_preuves",
+    "coherence_intersources",
+    "fraicheur",
+    "validation_humaine",
+)
+
+
+class MatchBasis(str, enum.Enum):
+    EXACT_IDENTIFIER = "exact_identifier"
+    SIMILARITY = "similarity"
+    CROSS_REFERENCE = "cross_reference"
+
+
+class MatchStatus(str, enum.Enum):
+    PROPOSED = "proposed"
+    VALIDATED = "validated"
+    REJECTED = "rejected"
+
+
+class DecisionAction(str, enum.Enum):
+    VALIDATE = "validate"
+    REJECT = "reject"
+    CORRECT = "correct"
+    ANNOTATE = "annotate"
+    PROPOSE_MATCH = "propose_match"
+    MERGE = "merge"
+    UNDO = "undo"
+
+
+class DecisionTargetType(str, enum.Enum):
+    ENTITY = "entity"
+    RELATION = "relation"
+    ASSERTION = "assertion"
+    MATCH_PROPOSAL = "match_proposal"
+
+
+class DecisionRequest(BaseModel):
+    """Action humaine supervisee sur le graphe (C6, CON-09) : historisee et reversible via `reverts`."""
+
+    target_type: DecisionTargetType
+    target_id: str
+    action: DecisionAction
+    payload: dict[str, Any] = Field(default_factory=dict)
+    reverts: Optional[str] = None
+
+
+class MatchProposalRequest(BaseModel):
+    entity_a: str
+    entity_b: str
+    basis: MatchBasis = MatchBasis.SIMILARITY
+    justification: str = ""
+    confidence: ConfidenceLevel = ConfidenceLevel.FAIBLE

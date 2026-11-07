@@ -11,7 +11,15 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..engine import Engine
-from ..models import ApiError, CreateBranchRequest, CreateInvestigationRequest, PolicyDeny, StopRequest
+from ..models import (
+    ApiError,
+    CreateBranchRequest,
+    CreateInvestigationRequest,
+    DecisionRequest,
+    MatchProposalRequest,
+    PolicyDeny,
+    StopRequest,
+)
 
 
 def create_app(engine: Engine) -> FastAPI:
@@ -169,6 +177,109 @@ def create_app(engine: Engine) -> FastAPI:
             for r in await engine.repo.list_proof_refs(investigation_id)
         ]
 
+    @app.get("/api/v1/investigations/{investigation_id}/graph")
+    async def get_graph(
+        investigation_id: str,
+        request: Request,
+        branch_id: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        entities = await engine.graph.list_entities(investigation_id, limit=limit, offset=offset)
+        relations = await engine.graph.list_relations(investigation_id, branch_id=branch_id)
+        return {
+            "entities": [_entity_json(e) for e in entities],
+            "relations": [_relation_json(r) for r in relations],
+        }
+
+    @app.get("/api/v1/investigations/{investigation_id}/entities/{entity_id}")
+    async def get_entity(investigation_id: str, entity_id: str, request: Request) -> dict:
+        await require_auth(request)
+        sheet = await engine.graph.entity_sheet(investigation_id, entity_id)
+        if sheet is None:
+            raise ApiError("not_found", "entite inconnue", 404)
+        return {
+            "entity": _entity_json(sheet["entity"]),
+            "identifiers": sheet["identifiers"],
+            "relations_out": [_relation_json(r) for r in sheet["relations_out"]],
+            "relations_in": [_relation_json(r) for r in sheet["relations_in"]],
+            "branches": sheet["branches"],
+        }
+
+    @app.get("/api/v1/investigations/{investigation_id}/relations")
+    async def list_relations(investigation_id: str, request: Request, branch_id: Optional[str] = None) -> list[dict]:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return [_relation_json(r) for r in await engine.graph.list_relations(investigation_id, branch_id=branch_id)]
+
+    @app.get("/api/v1/investigations/{investigation_id}/assertions")
+    async def list_assertions(
+        investigation_id: str, request: Request, branch_id: Optional[str] = None, include_superseded: bool = False
+    ) -> list[dict]:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return [_assertion_json(a) for a in await engine.graph.list_assertions(investigation_id, branch_id=branch_id, include_superseded=include_superseded)]
+
+    @app.get("/api/v1/investigations/{investigation_id}/matches")
+    async def list_matches(investigation_id: str, request: Request, status: Optional[str] = None) -> list[dict]:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return [_match_json(m) for m in await engine.graph.list_matches(investigation_id, status=status)]
+
+    @app.post("/api/v1/investigations/{investigation_id}/matches", status_code=201)
+    async def create_match(investigation_id: str, request: Request, body: MatchProposalRequest) -> dict:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        proposal = await engine.graph.propose_match(
+            investigation_id,
+            entity_a=body.entity_a,
+            entity_b=body.entity_b,
+            basis=body.basis,
+            justification=body.justification,
+            confidence=body.confidence,
+        )
+        return _match_json(proposal)
+
+    @app.post("/api/v1/investigations/{investigation_id}/decisions", status_code=201)
+    async def create_decision(
+        investigation_id: str,
+        request: Request,
+        body: DecisionRequest,
+        actor: Optional[str] = Header(default=None),
+    ) -> dict:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        decision = await engine.graph.decide(
+            investigation_id,
+            target_type=body.target_type,
+            target_id=body.target_id,
+            action=body.action,
+            payload=body.payload,
+            reverts=body.reverts,
+            actor=actor,
+        )
+        return _decision_json(decision)
+
+    @app.get("/api/v1/investigations/{investigation_id}/decisions")
+    async def list_decisions(investigation_id: str, request: Request) -> list[dict]:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return [_decision_json(d) for d in await engine.graph.list_decisions(investigation_id)]
+
+    @app.get("/api/v1/investigations/{investigation_id}/etayage")
+    async def get_etayage(investigation_id: str, request: Request, branch_id: Optional[str] = None) -> list[dict]:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return await engine.graph.etayage(investigation_id, branch_id=branch_id)
+
+    @app.get("/api/v1/investigations/{investigation_id}/objectif")
+    async def get_objectif(investigation_id: str, request: Request, branch_id: Optional[str] = None) -> dict:
+        await require_auth(request)
+        await _require_investigation(engine, investigation_id)
+        return await engine.graph.objective_etaye(investigation_id, branch_id=branch_id)
+
     @app.get("/api/v1/investigations/{investigation_id}/events", response_model=None)
     async def stream_events(investigation_id: str, request: Request, last_event_id: int = 0):
         await require_auth(request)
@@ -205,6 +316,88 @@ def create_app(engine: Engine) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream")
 
     return app
+
+
+async def _require_investigation(engine: Engine, investigation_id: str) -> None:
+    if await engine.repo.get_investigation(investigation_id) is None:
+        raise ApiError("not_found", "investigation inconnue", 404)
+
+
+def _loads(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _entity_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "kind": row["kind"],
+        "data": _loads(row["data"]),
+        "merged_into": row["merged_into"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+def _relation_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "branch_id": row["branch_id"],
+        "src_id": row["src_id"],
+        "dst_id": row["dst_id"],
+        "type": row["type"],
+        "direction": row["direction"],
+        "valid_from": row["valid_from"].isoformat() if row["valid_from"] else None,
+        "valid_to": row["valid_to"].isoformat() if row["valid_to"] else None,
+        "support_level": row["support_level"],
+        "human_decision": row["human_decision"],
+        "proof_ids": _loads(row["proof_ids"]),
+        "match_proposal_id": row["match_proposal_id"],
+        "data": _loads(row["data"]),
+    }
+
+
+def _assertion_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "branch_id": row["branch_id"],
+        "statement": row["statement"],
+        "nature": row["nature"],
+        "support_level": row["support_level"],
+        "human_decision": row["human_decision"],
+        "decisive": row["decisive"],
+        "confidence": _loads(row["confidence"]),
+        "proof_ids": _loads(row["proof_ids"]),
+        "contradicted_by": _loads(row["contradicted_by"]),
+        "superseded_by": row["superseded_by"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+def _match_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "entity_a": row["entity_a"],
+        "entity_b": row["entity_b"],
+        "basis": row["basis"],
+        "justification": row["justification"],
+        "confidence": row["confidence"],
+        "status": row["status"],
+        "decided_by": row["decided_by"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+def _decision_json(row) -> dict:
+    return {
+        "id": row["id"],
+        "target_type": row["target_type"],
+        "target_id": row["target_id"],
+        "action": row["action"],
+        "payload": _loads(row["payload"]),
+        "reverts": row["reverts"],
+        "created_at": row["created_at"].isoformat(),
+    }
 
 
 def _inv_json(row) -> dict:

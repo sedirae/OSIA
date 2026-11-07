@@ -6,6 +6,7 @@ from .ai import AIBroker, SimulatedAIAdapter
 from .config import Settings
 from .connectors import ConnectorRegistry, SimulatedConnector
 from .events import EventBus
+from .graph import GraphService
 from .orchestrator import Orchestrator
 from .policies import BudgetManager, PolicyEngine
 from .scheduler import Scheduler
@@ -28,6 +29,7 @@ class Engine:
         self.registry: ConnectorRegistry
         self.broker: AIBroker
         self.filestore: FileStore
+        self.graph: GraphService
         self.orchestrator: Orchestrator
         self.scheduler: Scheduler
         self.external_semaphore: asyncio.Semaphore
@@ -63,6 +65,7 @@ class Engine:
         connector = SimulatedConnector()
         self.registry.register(connector)
         self.policy.allow_target(connector.manifest.id)
+        self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
         self.orchestrator = Orchestrator(self.pool, self.repo, self.bus)
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
 

@@ -38,6 +38,7 @@ class FileStore:
         source_url: str | None = None,
         media_type: str | None = None,
         label: str | None = None,
+        connector_id: str | None = None,
     ) -> dict:
         """Protocole en 4 phases : (1) .part fsync, (2) déplacement atomique + SHA-256,
         (3) transaction SQL proof_files + proof_refs, (4) commit."""
@@ -65,16 +66,17 @@ class FileStore:
                     len(content),
                 )
                 ref = await conn.fetchrow(
-                    "INSERT INTO proof_refs (id, investigation_id, proof_sha256, source_url, media_type, label) "
-                    "VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+                    "INSERT INTO proof_refs (id, investigation_id, proof_sha256, source_url, media_type, label, connector_id) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
                     new_id("proof"),
                     investigation_id,
                     sha256,
                     source_url,
                     media_type,
                     label,
+                    connector_id,
                 )
-        return {"sha256": sha256, "proof_ref_id": ref["id"], "size_bytes": len(content), "deduplicated": deduplicated}
+        return {"sha256": sha256, "proof_ref_id": ref["id"], "size_bytes": len(content), "deduplicated": deduplicated, "connector_id": connector_id}
 
     async def check_integrity(self) -> IntegrityReport:
         """Détecte les incohérences base/fichiers (CON-02 §3, OSIA-I-10).
