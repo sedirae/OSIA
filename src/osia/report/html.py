@@ -125,18 +125,18 @@ function renderEntites(){
   const prev = $('#q-entites');
   const q = ((prev&&prev.value)||'').toLowerCase();
   const rows = (DATA.entities||[]).filter(e=>!q || JSON.stringify(e).toLowerCase().includes(q));
-  $('#panel-entites').innerHTML = '<div class="toolbar"><input id="q-entites" placeholder="Rechercher une entité…" value="'+esc($('#q-entites')?$('#q-entites').value:'')+'" aria-label="Rechercher une entité"></div>'+
+  $('#panel-entites').innerHTML = '<div class="toolbar"><input id="q-entites" placeholder="Rechercher une entité…" value="'+esc(q)+'" aria-label="Rechercher une entité"></div>'+
    rows.map(e=>'<div class="card"><h3><a href="#" data-ent="'+esc(e.id)+'">'+esc((e.data&&(e.data.nom||e.data.name||e.data.label))||e.id)+'</a> <span class="muted">'+esc(e.kind)+'</span></h3><div class="muted">'+esc(JSON.stringify(e.data)).slice(0,300)+'</div></div>').join('');
   $$('#panel-entites a[data-ent]').forEach(a=>a.addEventListener('click',ev=>{ev.preventDefault();showEntity(a.dataset.ent);}));
-  const qi = $('#q-entites'); if(qi) qi.addEventListener('input', renderEntites);
+  const qi = $('#q-entites'); if(qi){qi.addEventListener('input', renderEntites); if(q) qi.focus();}
 }
 function renderAssertions(){
   const prevA = $('#q-assert');
   const q = ((prevA&&prevA.value)||'').toLowerCase();
   const rows = (DATA.assertions||[]).filter(a=>!q || a.statement.toLowerCase().includes(q));
-  $('#panel-assertions').innerHTML = '<div class="toolbar"><input id="q-assert" placeholder="Rechercher une assertion…" value="" aria-label="Rechercher une assertion"></div>'+
+  $('#panel-assertions').innerHTML = '<div class="toolbar"><input id="q-assert" placeholder="Rechercher une assertion…" value="'+esc(q)+'" aria-label="Rechercher une assertion"></div>'+
    rows.map(a=>'<div class="card"><h3>'+esc(a.statement)+'</h3><div>'+supportTag(a.support_level)+' '+decTag(a.human_decision)+' <span class="tag">'+esc(a.nature)+'</span>'+(a.decisive?' <span class="tag confirmed">décisive</span>':'')+(a.contradicted_by&&a.contradicted_by.length?' <span class="tag contradicted">contradictions: '+esc(a.contradicted_by.join(', '))+'</span>':'')+'</div><div class="muted">preuves: '+esc((a.proof_ids||[]).join(', ')||'—')+' — branche '+esc(a.branch_id||'—')+'</div></div>').join('');
-  const qi=$('#q-assert'); if(qi) qi.addEventListener('input', renderAssertions);
+  const qi=$('#q-assert'); if(qi){qi.addEventListener('input', renderAssertions); if(q) qi.focus();}
 }
 function renderChrono(){
   const rows = (DATA.events||[]).slice().sort((a,b)=>String(a.created_at).localeCompare(String(b.created_at)));

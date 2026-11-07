@@ -220,6 +220,6 @@ def extract_payload(zf: zipfile.ZipFile, manifest: dict, *, encrypted: bool, key
         text = raw.decode("utf-8").strip()
         rows = [json.loads(line) for line in text.splitlines() if line.strip()] if text else []
         if path.endswith(".json"):
-            rows = [json.loads(text)]
+            rows = [json.loads(text)] if text else []
         payload[table] = rows
     return payload, proofs

@@ -62,3 +62,15 @@ async def test_html_embedded_js_renders_and_escapes(engine, tmp_path):
     assert "SCRIPT OK" in p.stdout, p.stdout
     assert "<img src=x onerror=" not in p.stdout
     assert "&lt;img src=x onerror=alert(1)&gt;" in p.stdout
+
+
+async def test_export_html_without_proofs_strips_metadata(engine, tmp_path):
+    """Regression audit PR#6 : include_proofs=False doit retirer les metadonnees de
+    preuves du rapport HTML (REC-D5-04), pas seulement des binaires de l'archive."""
+    inv = await make_investigation(engine)
+    proof, a = await _seed(engine, inv["id"])
+    result = await engine.exchange.export_investigation(inv["id"], format="html", include_proofs=False)
+    text = (pathlib.Path(result["dir"]) / "rapport.html").read_text(encoding="utf-8")
+    assert "https://exemple.test/secret-doc" not in text
+    assert proof["sha256"] not in text
+    assert result["partial"] is True
