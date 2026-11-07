@@ -17,6 +17,20 @@ async def wait_state(engine, inv_id, states, timeout=10.0):
     return await engine.repo.get_investigation(inv_id)
 
 
+def demo_only_connectors(engine):
+    """Mode démo explicite (audit F05) : seuls les connecteurs simulés restent actifs pendant ce
+    test hors ligne — la sélection automatique retombe alors sur simulated.web (visible)."""
+    ids = [e["id"] for e in engine.registry.list() if not e["id"].startswith("simulated.")]
+    for cid in ids:
+        engine.registry.set_enabled(cid, False)
+    return ids
+
+
+def restore_connectors(engine, ids):
+    for cid in ids:
+        engine.registry.set_enabled(cid, True)
+
+
 async def test_start_is_idempotent(engine):
     from osia.models import CreateInvestigationRequest
 
@@ -59,6 +73,7 @@ async def test_vertical_run_objective_reached(engine):
         "extraction": {"entities": [{"kind": "entreprise", "name": "ACME", "identifiers": {"siren": "123456789"}}], "relations": []},
         "synthesis": {"conclusion": "ACME existe", "support": "documenté", "decisive_sources": ["https://example.test/simulated?q=requete-1"], "objective_sufficiently_supported": True},
     }
+    real_ids = demo_only_connectors(engine)  # F05 : parcours simulé = mode démo explicite
     await engine.start()
     inv = await make_investigation(engine, title="verticale", objective="Vérifier ACME")
     try:
@@ -84,6 +99,7 @@ async def test_vertical_run_objective_reached(engine):
         types = [e.type for e in events]
         assert "discovery" in types and "investigation.stopped" in types
     finally:
+        restore_connectors(engine, real_ids)
         engine.scheduler.stop()
         if engine._runner:
             await engine._runner
@@ -99,6 +115,7 @@ async def test_rebonds_until_depth_limit(engine):
             {"conclusion": "partiel", "support": "à confirmer", "suggested_followups": ["q3"], "objective_sufficiently_supported": False},
         ],
     }
+    real_ids = demo_only_connectors(engine)  # F05 : parcours simulé = mode démo explicite
     await engine.start()
     inv = await make_investigation(engine, profile_id="approfondi", limits={"max_rebonds": 2})
     try:
@@ -108,6 +125,7 @@ async def test_rebonds_until_depth_limit(engine):
         sq = [t for t in tasks if t["kind"] == "source_query"]
         assert sorted(t["depth"] for t in sq) == [0, 1, 2]
     finally:
+        restore_connectors(engine, real_ids)
         engine.scheduler.stop()
         if engine._runner:
             await engine._runner

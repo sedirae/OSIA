@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import asyncpg
 
 from .ai.schemas import Extraction, PlanProposal, Synthesis
-from .connectors.base import FetchRequest, TrustLevel
+from .connectors.base import FetchRequest, FetchResult, Provenance, TrustLevel
+from .connectors.select import select_connector_id
 from .models import ClaimNature, OpKind, PolicyDeny, StopReason, SupportLevel
 from .policies.limits import limits_from_record
 
@@ -23,6 +26,58 @@ class TaskContext:
 
 TaskHandler = Callable[[asyncpg.Record, TaskContext], Awaitable[dict[str, Any]]]
 
+# Bornes du contexte de synthèse (F06) : le prompt reste borné quelle que soit la taille du graphe.
+SYNTHESIS_MAX_PROOFS = 50
+SYNTHESIS_MAX_ASSERTIONS = 100
+SYNTHESIS_MAX_RELATIONS = 200
+SYNTHESIS_MAX_DECISIONS = 100
+SYNTHESIS_MAX_TEXT = 2000
+
+
+def _trunc(value: Any, limit: int = SYNTHESIS_MAX_TEXT) -> Any:
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + "…"
+    return value
+
+
+def _parse_dt(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+
+async def _plan_source_payloads(engine: "Engine", plan: PlanProposal, limits: Any, inv_id: str, branch_id: str | None) -> list[dict[str, Any]]:
+    """F05 : propositions typées validées contre le registre ; à défaut, sélection par capacités.
+
+    Une proposition IA invalide ne fait pas échouer le plan : elle est journalisée (événement
+    `plan.selection_rejected`) et remplacée par la sélection déterministe par capacités."""
+    payloads: list[dict[str, Any]] = []
+    selections = plan.selections[: limits.max_source_requests]
+    if selections:
+        for sel in selections:
+            try:
+                connector_id, simulated = select_connector_id(engine.registry, sel.query, requested_id=sel.connector_id)
+            except PolicyDeny:
+                await engine.bus.emit(
+                    type="plan.selection_rejected",
+                    investigation_id=inv_id,
+                    branch_id=branch_id,
+                    payload={"connector_id": sel.connector_id, "query": sel.query, "reason": "connecteur non actif dans le registre"},
+                )
+                connector_id, simulated = select_connector_id(engine.registry, sel.query)
+            payloads.append({"query": sel.query, "connector_id": connector_id, "params": dict(sel.params), "simulated": simulated})
+    else:
+        for query in plan.source_queries[: limits.max_source_requests]:
+            connector_id, simulated = select_connector_id(engine.registry, query)
+            payloads.append({"query": query, "connector_id": connector_id, "simulated": simulated})
+    return payloads
+
 
 async def handle_plan(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
     engine = ctx.engine
@@ -30,31 +85,107 @@ async def handle_plan(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
     limits = limits_from_record(inv)
     plan = await engine.broker.call(
         "planning",
-        prompt="Décomposer l'objectif en sous-objectifs et requêtes source",
-        input_data={"objective": inv["objective"], "hints": inv["hints"], "title": inv["title"]},
+        prompt=(
+            "Décomposer l'objectif en sous-objectifs et requêtes source typées : pour chaque requête, "
+            "choisir un connector_id parmi available_connectors selon ses capabilities et son scope"
+        ),
+        input_data={
+            "objective": inv["objective"],
+            "hints": inv["hints"],
+            "title": inv["title"],
+            "available_connectors": engine.registry.list(),
+        },
         response_model=PlanProposal,
         investigation_id=inv["id"],
         branch_id=task["branch_id"],
         task_id=task["id"],
         depth=task["depth"],
     )
-    queries = plan.source_queries[: limits.max_source_requests]
-    for query in queries:
+    payloads = await _plan_source_payloads(engine, plan, limits, inv["id"], task["branch_id"])
+    for payload in payloads:
         await engine.repo.insert_task(
             investigation_id=inv["id"],
             branch_id=task["branch_id"],
             kind="source_query",
-            payload={"query": query, "connector_id": "simulated.web"},
+            payload=payload,
             depth=task["depth"],
             priority=10,
         )
+    queries = [p["query"] for p in payloads]
     await engine.bus.emit(
         type="plan.revised",
         investigation_id=inv["id"],
         branch_id=task["branch_id"],
-        payload={"sub_objectives": plan.sub_objectives, "queries": queries},
+        payload={
+            "sub_objectives": plan.sub_objectives,
+            "queries": queries,
+            "connectors": {p["query"]: p["connector_id"] for p in payloads},
+            "simulated_sources": sorted({p["connector_id"] for p in payloads if p.get("simulated")}),
+        },
     )
-    return {"sub_objectives": plan.sub_objectives, "queries": queries}
+    return {"sub_objectives": plan.sub_objectives, "queries": queries, "source_tasks": payloads}
+
+
+async def _extract_and_enqueue_synthesis(
+    engine: "Engine",
+    inv: asyncpg.Record,
+    task: asyncpg.Record,
+    payload: dict[str, Any],
+    result: FetchResult,
+    proof: dict[str, Any],
+) -> Extraction:
+    """Traitement métier commun à une collecte et à un hit cache (F09) : extraction IA,
+    graphe (entités/relations) puis tâche de synthèse. Le cache évite l'I/O externe, pas le résultat."""
+    extraction = await engine.broker.call(
+        "extraction",
+        prompt="Extraire entités et relations du contenu collecté",
+        input_data={
+            "content": result.extracted_text or result.content,
+            "source_url": result.provenance.url,
+            "proof_id": proof["proof_ref_id"],
+        },
+        response_model=Extraction,
+        investigation_id=inv["id"],
+        branch_id=task["branch_id"],
+        task_id=task["id"],
+        depth=task["depth"],
+    )
+    entity_ids: dict[str, str] = {}
+    for entity in extraction.entities:
+        upserted = await engine.graph.upsert_entity(
+            inv["id"],
+            kind=entity.kind,
+            data={"name": entity.name, "identifiers": entity.identifiers},
+            identifiers=entity.identifiers,
+            branch_id=task["branch_id"],
+        )
+        entity_ids[entity.name] = upserted["entity_id"]
+    support_map = {
+        "confirmed": SupportLevel.CORROBORE,
+        "hypothesis": SupportLevel.A_CONFIRMER,
+        "contradicted": SupportLevel.CONTRADICTOIRE,
+    }
+    for relation in extraction.relations:
+        if relation.src in entity_ids and relation.dst in entity_ids:
+            await engine.graph.add_relation(
+                inv["id"],
+                branch_id=task["branch_id"],
+                src_id=entity_ids[relation.src],
+                dst_id=entity_ids[relation.dst],
+                type=relation.type,
+                support_level=support_map.get(relation.status, SupportLevel.A_CONFIRMER),
+                proof_ids=[proof["proof_ref_id"]],
+                derivation="ia",
+            )
+    await engine.repo.insert_task(
+        investigation_id=inv["id"],
+        branch_id=task["branch_id"],
+        kind="synthesize",
+        payload={"query": payload["query"]},
+        depth=task["depth"],
+        priority=5,
+    )
+    return extraction
 
 
 async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
@@ -63,7 +194,16 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     payload = task["payload"]
     connector = engine.registry.get(payload["connector_id"])
     if connector is None:
-        raise PolicyDeny("connecteur_non_autorise", "source")
+        # F05 : connecteur explicitement demandé mais indisponible -> erreur de configuration
+        # explicite, AUCUN repli silencieux sur un autre connecteur (ni sur la simulation).
+        known = False
+        list_fn = getattr(engine.registry, "list", None)
+        if callable(list_fn):
+            known = any(e["id"] == payload["connector_id"] for e in list_fn())
+        raise PolicyDeny(
+            f"connecteur_demande_indisponible:{payload['connector_id']}" if known else f"connecteur_inconnu:{payload['connector_id']}",
+            "source",
+        )
     # T5.1 : un connecteur EXPERIMENTAL exige une autorisation explicite persistée
     if connector.manifest.trust_level == TrustLevel.EXPERIMENTAL:
         allowed = await engine.repo.get_setting(f"allow_experimental:{connector.manifest.id}", False)
@@ -74,13 +214,47 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     ttl_hours = await engine.repo.get_setting("source_cache_ttl_hours", 24)
     cached = await engine.repo.cache_get(connector.manifest.id, payload["query"])
     if cached is not None:
+        # F09 : un hit cache suit le MÊME traitement métier qu'une collecte (preuve rattachée,
+        # extraction, synthèse) — il évite seulement l'appel externe redondant. La date et la
+        # provenance d'origine sont conservées (entrée de cache non réécrite, événement tracé).
+        result = FetchResult(
+            content=cached.get("content", ""),
+            provenance=Provenance(
+                source_id=connector.manifest.id,
+                url=cached.get("url"),
+                fetched_at=_parse_dt(cached.get("fetched_at")),
+                http_status=cached.get("http_status"),
+            ),
+            media_type=cached.get("media_type", "application/json"),
+            extracted_text=cached.get("extracted_text"),
+        )
+        proof = await engine.filestore.store_proof(
+            investigation_id=inv["id"],
+            content=result.content.encode("utf-8"),
+            source_url=result.provenance.url,
+            media_type=result.media_type,
+            label=payload["query"],
+            connector_id=result.provenance.source_id,
+        )
         await engine.bus.emit(
             type="discovery",
             investigation_id=inv["id"],
             branch_id=task["branch_id"],
-            payload={"query": payload["query"], "cached": True, "fetched_at": cached.get("fetched_at")},
+            payload={
+                "query": payload["query"],
+                "cached": True,
+                "fetched_at": cached.get("fetched_at"),
+                "url": result.provenance.url,
+                "proof_sha256": proof["sha256"],
+            },
         )
-        return {"cached": True, "connector_id": connector.manifest.id, "query": payload["query"], "result": cached}
+        engine.techlog.log(
+            "tasks", "source.query",
+            investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"],
+            detail={"connector_id": connector.manifest.id, "cached": True, "http_status": result.provenance.http_status},
+        )
+        await _extract_and_enqueue_synthesis(engine, inv, task, payload, result, proof)
+        return {"cached": True, "connector_id": connector.manifest.id, "query": payload["query"], "proof_sha256": proof["sha256"], "result": cached}
     decision = await engine.policy.authorize(
         investigation_id=inv["id"],
         kind=OpKind.SOURCE_REQUEST,
@@ -106,7 +280,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
                 await engine.policy.cancel_op(decision.op_id, reason="operation_annulee_avant_envoi")
                 raise PolicyDeny("operation_annulee_avant_envoi", "source")
             result = await asyncio.wait_for(
-                connector.fetch(FetchRequest(query=payload["query"])),
+                connector.fetch(FetchRequest(query=payload["query"], params=payload.get("params") or {})),
                 timeout=decision.timeout_seconds or 15,
             )
     except asyncio.TimeoutError as exc:
@@ -157,52 +331,83 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
         branch_id=task["branch_id"],
         payload={"query": payload["query"], "url": result.provenance.url, "proof_sha256": proof["sha256"]},
     )
-    extraction = await engine.broker.call(
-        "extraction",
-        prompt="Extraire entités et relations du contenu collecté",
-        input_data={"content": result.extracted_text or result.content},
-        response_model=Extraction,
-        investigation_id=inv["id"],
-        branch_id=task["branch_id"],
-        task_id=task["id"],
-        depth=task["depth"],
-    )
-    entity_ids: dict[str, str] = {}
-    for entity in extraction.entities:
-        upserted = await engine.graph.upsert_entity(
-            inv["id"],
-            kind=entity.kind,
-            data={"name": entity.name, "identifiers": entity.identifiers},
-            identifiers=entity.identifiers,
-            branch_id=task["branch_id"],
-        )
-        entity_ids[entity.name] = upserted["entity_id"]
-    support_map = {
-        "confirmed": SupportLevel.CORROBORE,
-        "hypothesis": SupportLevel.A_CONFIRMER,
-        "contradicted": SupportLevel.CONTRADICTOIRE,
-    }
-    for relation in extraction.relations:
-        if relation.src in entity_ids and relation.dst in entity_ids:
-            await engine.graph.add_relation(
-                inv["id"],
-                branch_id=task["branch_id"],
-                src_id=entity_ids[relation.src],
-                dst_id=entity_ids[relation.dst],
-                type=relation.type,
-                support_level=support_map.get(relation.status, SupportLevel.A_CONFIRMER),
-                proof_ids=[proof["proof_ref_id"]],
-                derivation="ia",
-            )
-    await engine.repo.insert_task(
-        investigation_id=inv["id"],
-        branch_id=task["branch_id"],
-        kind="synthesize",
-        payload={"query": payload["query"]},
-        depth=task["depth"],
-        priority=5,
-    )
+    extraction = await _extract_and_enqueue_synthesis(engine, inv, task, payload, result, proof)
     return {"query": payload["query"], "proof_sha256": proof["sha256"], "entities": len(extraction.entities)}
+
+
+async def _build_synthesis_input(engine: "Engine", inv: asyncpg.Record, task: asyncpg.Record) -> tuple[dict[str, Any], list]:
+    """F06 : entrée de synthèse = objectif + branche + preuves (id stables) + assertions +
+    relations + décisions humaines + contradictions, le tout borné en taille."""
+    proof_rows = await engine.repo.list_proof_refs(inv["id"])
+    proofs_ctx = [
+        {
+            "id": r["id"],
+            "sha256": r["proof_sha256"],
+            "source_url": r["source_url"],
+            "label": _trunc(r["label"], 500),
+            "connector_id": r["connector_id"],
+            "media_type": r["media_type"],
+            "size_bytes": r["size_bytes"],
+            "fetched_at": r["fetched_at"].isoformat() if r["fetched_at"] else None,
+        }
+        for r in proof_rows[:SYNTHESIS_MAX_PROOFS]
+    ]
+    assertions = await engine.graph.list_assertions(inv["id"], branch_id=task["branch_id"])
+
+    def _ids(value: Any) -> list[str]:
+        return list(value) if isinstance(value, (list, tuple)) else []
+
+    assertions_ctx = [
+        {
+            "id": a["id"],
+            "statement": _trunc(a["statement"]),
+            "nature": a["nature"],
+            "support_level": a["support_level"],
+            "human_decision": a["human_decision"],
+            "decisive": a["decisive"],
+            "proof_ids": _ids(a["proof_ids"]),
+            "contradicted_by": _ids(a["contradicted_by"]),
+        }
+        for a in assertions[:SYNTHESIS_MAX_ASSERTIONS]
+    ]
+    relations_ctx = [
+        {
+            "src_id": r["src_id"],
+            "dst_id": r["dst_id"],
+            "type": r["type"],
+            "support_level": r["support_level"],
+            "proof_ids": _ids(r["proof_ids"]),
+        }
+        for r in (await engine.graph.list_relations(inv["id"], branch_id=task["branch_id"], limit=SYNTHESIS_MAX_RELATIONS))[:SYNTHESIS_MAX_RELATIONS]
+    ]
+    decisions_ctx = [
+        {
+            "id": d["id"],
+            "assertion_id": d["assertion_id"],
+            "action": d["action"],
+            # P2-1 (audit PR #20) : payload jsonb = dict, sérialisé PUIS tronqué — le contexte
+            # de synthèse reste borné quelle que soit la taille du payload de la décision.
+            "payload": _trunc(d["payload"] if isinstance(d["payload"], str) else json.dumps(d["payload"], ensure_ascii=False, default=str), 1000),
+            "created_at": d["created_at"].isoformat() if d["created_at"] else None,
+        }
+        for d in (await engine.graph.list_decisions(inv["id"], limit=SYNTHESIS_MAX_DECISIONS))[:SYNTHESIS_MAX_DECISIONS]
+    ]
+    contradictions_ctx = [a for a in assertions_ctx if a["support_level"] == "contradictoire" or a["contradicted_by"]]
+    input_data = {
+        "objective": inv["objective"],
+        "depth": task["depth"],
+        "branch_id": task["branch_id"],
+        "proofs": proofs_ctx,
+        "assertions": assertions_ctx,
+        "relations": relations_ctx,
+        "decisions": decisions_ctx,
+        "contradictions": contradictions_ctx,
+        "output_contract": (
+            "decisive_proof_ids doit contenir des id de preuves présents dans proofs (identifiants stables) ; "
+            "decisive_sources des URLs présentes dans proofs[].source_url. Toute référence inventée est rejetée."
+        ),
+    }
+    return input_data, proof_rows
 
 
 async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str, Any]:
@@ -211,18 +416,22 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
     if inv["state"] != "running":
         return {"skipped": f"investigation {inv['state']}"}
     limits = limits_from_record(inv)
+    # F06 : la synthèse reçoit le contexte de preuves borné + graphe + décisions (pas seulement
+    # {objective, depth}) ; le schéma JSON de sortie est transmis par le courtier (T8.6).
+    input_data, proof_rows = await _build_synthesis_input(engine, inv, task)
     synthesis = await engine.broker.call(
         "synthesis",
         prompt="Synthétiser les acquis et évaluer l'étayage de l'objectif",
-        input_data={"objective": inv["objective"], "depth": task["depth"]},
+        input_data=input_data,
         response_model=Synthesis,
         investigation_id=inv["id"],
         branch_id=task["branch_id"],
         task_id=task["id"],
         depth=task["depth"],
     )
-    proof_rows = await engine.repo.list_proof_refs(inv["id"])
-    proof_ids = []
+    # F06 : identifiants de preuves stables d'abord, égalité d'URL en repli.
+    valid_ids = {r["id"] for r in proof_rows}
+    proof_ids = [pid for pid in synthesis.decisive_proof_ids if pid in valid_ids]
     for source in synthesis.decisive_sources:
         matched = [r["id"] for r in proof_rows if r["source_url"] and r["source_url"] == source]
         proof_ids.extend(matched)
@@ -268,11 +477,14 @@ async def handle_synthesize(task: asyncpg.Record, ctx: TaskContext) -> dict[str,
         return {"conclusion": synthesis.conclusion, "stop": "objective_suffisamment_etaye", "objectif": objectif}
     if task["depth"] < limits.max_rebonds:
         for followup in synthesis.suggested_followups[: limits.max_source_requests]:
+            # F05 : rebond routé comme une requête initiale (sélection par capacités), jamais
+            # `simulated.web` en dur.
+            connector_id, simulated = select_connector_id(engine.registry, followup)
             await engine.repo.insert_task(
                 investigation_id=inv["id"],
                 branch_id=task["branch_id"],
                 kind="source_query",
-                payload={"query": followup, "connector_id": "simulated.web"},
+                payload={"query": followup, "connector_id": connector_id, "simulated": simulated},
                 depth=task["depth"] + 1,
                 priority=5,
             )

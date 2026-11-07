@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Optional, Type, TypeVar
 
@@ -89,10 +90,18 @@ class AIBroker:
     ) -> T:
         target = self._target(adapter)
         self.engine.allow_target(target)
+        # F06 / T8.6 : le contrat de sortie (JSON Schema du response_model) est transmis DANS le
+        # prompt — `json_object` seul n'impose pas les champs attendus. Le schéma est aussi pris
+        # en compte dans l'estimation des tokens d'entrée.
+        schema_json = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
+        full_prompt = (
+            f"{prompt}\n\nContrat de sortie (T8.6) : réponds UNIQUEMENT par un objet JSON conforme au "
+            f"JSON Schema ci-dessous, sans aucun texte autour.\n{schema_json}"
+        )
         # F03 / T8.4 : borne calculée depuis les tarifs token (entrée estimée + plafond de sortie),
         # jamais un forfait presented comme réel ; None = non bornable -> refusé par le moteur.
         estimate = (
-            adapter.estimate_cost_cents(adapter.estimate_input_tokens(prompt, input_data), adapter.max_output_tokens)
+            adapter.estimate_cost_cents(adapter.estimate_input_tokens(full_prompt, input_data), adapter.max_output_tokens)
             if adapter.paid
             else None
         )
@@ -138,7 +147,7 @@ class AIBroker:
                         await self.engine.cancel_op(op_id, reason="operation_annulee_avant_envoi")
                         raise PolicyDeny("operation_annulee_avant_envoi", "ai")
                     output, usage = await asyncio.wait_for(
-                        adapter.complete_with_usage(role, prompt, input_data, response_model),
+                        adapter.complete_with_usage(role, full_prompt, input_data, response_model),
                         timeout=decision.timeout_seconds or 60,
                     )
                 finally:

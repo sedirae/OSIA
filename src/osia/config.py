@@ -118,6 +118,9 @@ class Settings:
     timezone: str = "UTC"
     # CON-11 / V1.3 : fournisseurs IA (simulé par défaut — aucun appel payant sans config explicite)
     ai_provider: str = "simulated"
+    # Vrai si OSIA_AI_PROVIDER a été défini explicitement : un fournisseur demandé mais
+    # indisponible est alors une erreur de configuration (audit F05), pas un repli silencieux.
+    ai_provider_explicit: bool = False
     ai_local_base_url: str | None = None
     ai_local_model: str = "ministral-3-8b"
     ai_timeout_seconds: int = 60  # V1.4 : 60 s max par appel IA
@@ -173,6 +176,7 @@ class Settings:
         if cap:
             settings.global_monthly_cap_cents = int(cap)
         settings.ai_provider = os.environ.get("OSIA_AI_PROVIDER", settings.ai_provider)
+        settings.ai_provider_explicit = "OSIA_AI_PROVIDER" in os.environ
         settings.ai_local_base_url = os.environ.get("OSIA_AI_LOCAL_BASE_URL") or None
         settings.ai_local_model = os.environ.get("OSIA_AI_LOCAL_MODEL", settings.ai_local_model)
         ait = os.environ.get("OSIA_AI_TIMEOUT_SECONDS")

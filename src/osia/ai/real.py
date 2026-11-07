@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 from pydantic import BaseModel
 
-from ..config import Settings, is_local_host
+from ..config import ConfigError, Settings, is_local_host
 from ..netguard import NetworkGuard, RequestContext
 from ..nethttp import DEFAULT_MAX_BYTES, drop_credential_headers, make_connector, read_bounded
 from ..security import SecretStore
@@ -286,6 +286,17 @@ def build_ai_adapters(settings: Settings, secrets: Optional[SecretStore]) -> tup
         host = urlparse(settings.mistral_api_base).hostname
         if host:
             domains.add(host)
-    provider = settings.ai_provider if settings.ai_provider in adapters else "simulated"
+    provider = settings.ai_provider
+    if provider not in adapters:
+        # F05 : un fournisseur explicitement demandé (OSIA_AI_PROVIDER) mais indisponible est une
+        # erreur de configuration explicite — JAMAIS un repli silencieux sur `simulated`, qui
+        # produirait un plan vide valide confondu avec une investigation réelle sans résultat.
+        if getattr(settings, "ai_provider_explicit", False):
+            raise ConfigError(
+                f"fournisseur IA demandé indisponible: {provider!r} "
+                f"(disponibles: {', '.join(sorted(adapters))}) — compléter la configuration "
+                "(clé API / endpoint local) ou retirer OSIA_AI_PROVIDER"
+            )
+        provider = "simulated"
     role_models = {role: provider for role in ("planning", "extraction", "synthesis")}
     return adapters, role_models, domains
