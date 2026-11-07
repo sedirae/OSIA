@@ -59,6 +59,14 @@ def test_f14_scrub_removes_secrets():
     assert _scrub("connexion refusée password=hunter2 pour user", ["hunter2"]) == "connexion refusée password=*** pour user"
 
 
+def test_f14_mask_dsn_hides_password():
+    """P2-1 (audit PR #23) : le DSN journalisé dans l'événement backup.restored est masqué."""
+    from osia.backup.service import _mask_dsn
+    assert _mask_dsn("postgresql://user:hunter2@host:5432/db") == "postgresql://user:***@host:5432/db"
+    assert _mask_dsn("postgresql://host/db") == "postgresql://host/db"
+    assert _mask_dsn(None) is None
+
+
 async def test_f14_backup_config_inventory_excludes_secrets(engine, tmp_path):
     """Le manifeste liste les fichiers de config inclus (empreintes) et les secrets exclus
     (noms seulement, jamais le contenu)."""

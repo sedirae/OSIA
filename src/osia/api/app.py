@@ -478,7 +478,7 @@ def create_app(engine: Engine) -> FastAPI:
     @app.get("/api/v1/investigations/{investigation_id}/events", response_model=None)
     async def stream_events(investigation_id: str, request: Request, last_event_id: int = 0):
         await require_auth(request)
-        # F15 : le header standard Last-Event-ID est pris en compte (prioritaire sur le paramètre)
+        # F15 : le header standard Last-Event-ID est pris en compte (max avec le paramètre de requête)
         header_last = request.headers.get("last-event-id")
         if header_last:
             try:

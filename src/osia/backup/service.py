@@ -70,6 +70,21 @@ def _scrub(text: str, secrets: list[str]) -> str:
     return text
 
 
+def _mask_dsn(dsn: Optional[str]) -> Optional[str]:
+    """Masque le mot de passe d'un DSN avant journalisation (T5.9, audit PR #23 P2-1) :
+    l'événement `backup.restored` est persisté en base et exposé via l'API events."""
+    if not dsn:
+        return dsn
+    parsed = urllib.parse.urlparse(dsn)
+    if not parsed.password:
+        return dsn
+    host = parsed.hostname or ""
+    if parsed.port:
+        host += f":{parsed.port}"
+    userinfo = f"{parsed.username}:***@" if parsed.username else "***@"
+    return urllib.parse.urlunparse(parsed._replace(netloc=userinfo + host))
+
+
 async def _run_pg(args: list[str], env: dict[str, str], secrets: list[str]) -> None:
     """Exécute un binaire PostgreSQL SANS bloquer la boucle d'événements (audit F14) et en
     levant une BackupError dont le stderr est nettoyé des secrets (diagnostic CI exploitable)."""
@@ -341,7 +356,11 @@ class BackupService:
           sont remplacées (après sauvegarde préalable).
         - `target_dsn` fourni : restauration vers une base externe (staging/maintenance) —
           `target_proofs_dir` EXPLICITE requis ; les preuves de l'installation courante ne sont
-          JAMAIS touchées, et la sauvegarde préalable porte sur la base cible."""
+          JAMAIS touchées, et la sauvegarde préalable porte sur la base cible.
+
+        Les fichiers de configuration listés dans le manifeste (`config_files`) sont INFORMATIFS :
+        ils ne sont jamais remis en place par la restauration (les secrets exclus ne figurent pas
+        dans la sauvegarde ; ils proviennent de l'environnement/coffre de l'installation)."""
         if not confirm:
             raise BackupError("restauration destructive : confirmation explicite requise (confirm=True / --yes)")
         row = await self.get_backup(backup_id)
@@ -416,12 +435,13 @@ class BackupService:
         if pre_restore_journal is not None:
             await self._journal(pre_restore_journal)
             await self.bus.emit(type="backup.created", payload={"backup_id": pre_restore_journal["id"], "dest_dir": pre_restore_journal["dest_dir"], "kind": "pre_restore", "proof_files": pre_restore_journal["proof_files_count"]})
-        await self.bus.emit(type="backup.restored", payload={"backup_id": backup_id, "pre_restore": pre_restore["id"] if pre_restore else None, "target_dsn": target_dsn})
+        # P2-1 (audit PR #23) : le DSN est masqué avant persistance (événement journalisé, T5.9)
+        await self.bus.emit(type="backup.restored", payload={"backup_id": backup_id, "pre_restore": pre_restore["id"] if pre_restore else None, "target_dsn": _mask_dsn(target_dsn)})
         return {
             "backup_id": backup_id,
             "restored": True,
             "pre_restore_backup_id": pre_restore["id"] if pre_restore else None,
-            "target_dsn": target_dsn,
+            "target_dsn": _mask_dsn(target_dsn),
             "target_proofs_dir": str(target_proofs_dir) if target_proofs_dir else None,
         }
 
