@@ -8,12 +8,13 @@ from .config import Settings
 from .connectors import ConnectorRegistry, SimulatedConnector
 from .events import EventBus
 from .exchange import ExchangeService
+from .netguard import NetworkGuard, NetworkPolicy
 from .graph import GraphService
 from .orchestrator import Orchestrator
 from .policies import BudgetManager, PolicyEngine
 from .report import ReportService
 from .scheduler import Scheduler
-from .security import SecurityAudit, SessionManager
+from .security import SecretStore, SecurityAudit, SessionManager
 from .store import create_pool, migrate
 from .store.files import FileStore
 from .store.repo import Repo
@@ -41,6 +42,8 @@ class Engine:
         self.scheduler: Scheduler
         self.audit: SecurityAudit
         self.sessions: SessionManager
+        self.netguard: NetworkGuard
+        self.secrets: SecretStore
         self.external_semaphore: asyncio.Semaphore
         self._runner: asyncio.Task | None = None
 
@@ -82,6 +85,18 @@ class Engine:
         self.scheduler = Scheduler(self.pool, self.repo, self.bus, DEFAULT_HANDLERS, self)
         self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
         self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
+        allowed_domains = set(self.settings.net_allow_domains)
+        for entry in self.registry.list():
+            allowed_domains.update(entry.get("domains", []))
+        self.netguard = NetworkGuard(
+            NetworkPolicy(
+                allowed_domains=allowed_domains,
+                denied_domains=set(self.settings.net_deny_domains),
+                max_bytes=self.settings.net_max_bytes,
+            ),
+            audit=self.audit,
+        )
+        self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
 
     async def start(self) -> dict:
         recovery = await self.scheduler.recover()

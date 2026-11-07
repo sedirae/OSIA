@@ -23,10 +23,12 @@ from ..models import (
     CreateInvestigationRequest,
     DecisionRequest,
     ExportRequest,
+    ConnectorToggleRequest,
     ImportApplyRequest,
     ImportPreviewRequest,
     LoginRequest,
     MatchProposalRequest,
+    SecretSetRequest,
     PolicyDeny,
     StopRequest,
 )
@@ -526,6 +528,69 @@ def create_app(engine: Engine) -> FastAPI:
         result = await engine.backup.verify(backup_id)
         _audit_op("op.backup.verify", request, {"backup_id": backup_id, "verified": result.get("verified")})
         return result
+
+    @app.get("/api/v1/net/policy")
+    async def get_net_policy(request: Request) -> dict:
+        """CON-06 / T5.4 : politique réseau effective (domaines, limites)."""
+        await require_auth(request)
+        p = engine.netguard.policy
+        return {
+            "allowed_domains": sorted(p.allowed_domains),
+            "denied_domains": sorted(p.denied_domains),
+            "max_redirects": p.max_redirects,
+            "timeout_seconds": p.timeout_seconds,
+            "max_bytes": p.max_bytes,
+            "min_interval_seconds": p.min_interval_seconds,
+            "blocked_networks": [str(n) for n in p.blocked_networks],
+        }
+
+    @app.get("/api/v1/secrets")
+    async def list_secrets(request: Request) -> dict:
+        """CON-06 / T5.5 : noms des secrets uniquement, jamais les valeurs."""
+        await require_auth(request)
+        return {"names": engine.secrets.names()}
+
+    @app.put("/api/v1/secrets/{name}")
+    async def set_secret(name: str, request: Request, body: SecretSetRequest) -> dict:
+        await require_auth(request)
+        engine.secrets.set(name, body.value)
+        _audit_op("op.secret.set", request, {"name": name})
+        return {"name": name, "stored": True}
+
+    @app.delete("/api/v1/secrets/{name}")
+    async def delete_secret(name: str, request: Request) -> dict:
+        await require_auth(request)
+        deleted = engine.secrets.delete(name)
+        _audit_op("op.secret.delete", request, {"name": name, "existed": deleted})
+        return {"name": name, "deleted": deleted}
+
+    @app.get("/api/v1/connectors")
+    async def list_connectors(request: Request) -> list[dict]:
+        """CON-06 / T5.1 : connecteurs enregistrés avec leur niveau de confiance."""
+        await require_auth(request)
+        return engine.registry.list()
+
+    @app.post("/api/v1/connectors/{connector_id}/toggle")
+    async def toggle_connector(connector_id: str, request: Request, body: ConnectorToggleRequest) -> dict:
+        """CON-06 / T5.1 : activation/désactivation. Un connecteur EXPERIMENTAL exige
+        `confirm: true` (autorisation explicite) ; l'autorisation est persistée et auditée."""
+        await require_auth(request)
+        manifest = None
+        for entry in engine.registry.list():
+            if entry["id"] == connector_id:
+                manifest = entry
+        if manifest is None:
+            raise ApiError("not_found", "connecteur inconnu", 404)
+        if body.enabled and manifest["trust_level"] == "experimental" and not body.confirm:
+            raise ApiError("confirmation_requise", "connecteur expérimental : confirm=true exigé (T5.1)", 400)
+        engine.registry.set_enabled(connector_id, body.enabled)
+        if body.enabled and manifest["trust_level"] == "experimental":
+            await engine.repo.set_setting(f"allow_experimental:{connector_id}", True)
+            engine.policy.allow_target(connector_id)
+        elif not body.enabled:
+            await engine.repo.set_setting(f"allow_experimental:{connector_id}", False)
+        _audit_op("op.connector.toggle", request, {"connector_id": connector_id, "enabled": body.enabled, "trust_level": manifest["trust_level"]})
+        return {"id": connector_id, "enabled": body.enabled}
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()
 

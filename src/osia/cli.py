@@ -291,6 +291,108 @@ async def _cmd_audit(args) -> int:
     return 0
 
 
+async def _cmd_net_policy(args) -> int:
+    """CON-06 / T5.4 : affiche la politique réseau effective."""
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    p = engine.netguard.policy
+    print(json.dumps({
+        "allowed_domains": sorted(p.allowed_domains),
+        "denied_domains": sorted(p.denied_domains),
+        "max_redirects": p.max_redirects,
+        "timeout_seconds": p.timeout_seconds,
+        "max_bytes": p.max_bytes,
+        "min_interval_seconds": p.min_interval_seconds,
+        "blocked_networks": [str(n) for n in p.blocked_networks],
+    }, ensure_ascii=False, indent=2))
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_secrets_list(args) -> int:
+    from .security import SecretStore
+
+    settings = _settings()
+    store = SecretStore(settings.paths.config_dir, persist=settings.secrets_persist)
+    for name in store.names():
+        print(name)
+    return 0
+
+
+async def _cmd_secrets_set(args) -> int:
+    """CON-06 / T5.5 : la valeur passe par variable d'environnement ou prompt, jamais en argument."""
+    from .security import SecretStore
+
+    settings = _settings()
+    store = SecretStore(settings.paths.config_dir, persist=settings.secrets_persist)
+    value = os.environ.get("OSIA_SECRET_VALUE") or getpass.getpass(f"Valeur du secret {args.name} : ")
+    store.set(args.name, value)
+    print(f"secret enregistré (chiffré si persistance activée) : {args.name}")
+    return 0
+
+
+async def _cmd_secrets_get(args) -> int:
+    from .security import SecretStore
+
+    settings = _settings()
+    store = SecretStore(settings.paths.config_dir, persist=settings.secrets_persist)
+    value = store.get(args.name)
+    if value is None:
+        print(f"secret inconnu : {args.name}", file=sys.stderr)
+        return 1
+    print(value)
+    return 0
+
+
+async def _cmd_secrets_delete(args) -> int:
+    from .security import SecretStore
+
+    settings = _settings()
+    store = SecretStore(settings.paths.config_dir, persist=settings.secrets_persist)
+    deleted = store.delete(args.name)
+    print(json.dumps({"name": args.name, "deleted": deleted}, ensure_ascii=False))
+    return 0 if deleted else 1
+
+
+async def _cmd_connectors_list(args) -> int:
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    for c in engine.registry.list():
+        print(f"{c['id']}\t{c['trust_level']}\tenabled={c['enabled']}\tdomains={','.join(c['domains'])}")
+    await engine.pool.close()
+    return 0
+
+
+async def _cmd_connector_toggle(args) -> int:
+    """CON-06 / T5.1 : --confirm exigé pour activer un connecteur EXPERIMENTAL."""
+    from .connectors.base import TrustLevel
+    from .engine import Engine
+
+    engine = Engine(_settings())
+    await engine.setup()
+    connector = engine.registry._connectors.get(args.id)
+    if connector is None:
+        print(f"connecteur inconnu : {args.id}", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    if args.enable and connector.manifest.trust_level == TrustLevel.EXPERIMENTAL and not args.confirm:
+        print("connecteur expérimental : --confirm exigé (T5.1)", file=sys.stderr)
+        await engine.pool.close()
+        return 1
+    engine.registry.set_enabled(args.id, args.enable)
+    await engine.repo.set_setting(f"allow_experimental:{args.id}", bool(args.enable and connector.manifest.trust_level == TrustLevel.EXPERIMENTAL))
+    if args.enable:
+        engine.policy.allow_target(args.id)
+    engine.audit.log("op.connector.toggle", "success", detail={"connector_id": args.id, "enabled": args.enable})
+    print(json.dumps({"id": args.id, "enabled": args.enable}, ensure_ascii=False))
+    await engine.pool.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="osia", description="OSIA — moteur d'investigation OSINT")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -370,6 +472,33 @@ def main(argv: list[str] | None = None) -> int:
     audit = sub.add_parser("audit", help="afficher le journal d'audit de sécurité (T5.9, sans secrets)")
     audit.add_argument("--limit", type=int, default=100)
     audit.set_defaults(func=_cmd_audit)
+
+    net = sub.add_parser("net", help="politique réseau centralisée (CON-06, T5.4)")
+    net_sub = net.add_subparsers(dest="net_command", required=True)
+    net_sub.add_parser("policy", help="afficher la politique réseau effective").set_defaults(func=_cmd_net_policy)
+
+    sec = sub.add_parser("secrets", help="coffre de secrets chiffré (CON-06, T5.5) — jamais de valeur en clair en argument")
+    sec_sub = sec.add_subparsers(dest="secrets_command", required=True)
+    sec_sub.add_parser("list", help="lister les noms de secrets").set_defaults(func=_cmd_secrets_list)
+    sset = sec_sub.add_parser("set", help="enregistrer un secret (env OSIA_SECRET_VALUE ou prompt)")
+    sset.add_argument("name")
+    sset.set_defaults(func=_cmd_secrets_set)
+    sget = sec_sub.add_parser("get", help="afficher un secret (usage local uniquement)")
+    sget.add_argument("name")
+    sget.set_defaults(func=_cmd_secrets_get)
+    sdel = sec_sub.add_parser("delete", help="supprimer un secret")
+    sdel.add_argument("name")
+    sdel.set_defaults(func=_cmd_secrets_delete)
+
+    conn = sub.add_parser("connectors", help="connecteurs enregistrés (CON-06, T5.1)")
+    conn_sub = conn.add_subparsers(dest="connectors_command", required=True)
+    conn_sub.add_parser("list", help="lister les connecteurs et leur niveau de confiance").set_defaults(func=_cmd_connectors_list)
+    ctoggle = conn_sub.add_parser("toggle", help="activer/désactiver un connecteur (--confirm pour experimental)")
+    ctoggle.add_argument("id")
+    ctoggle.add_argument("--enable", action="store_true", default=True)
+    ctoggle.add_argument("--disable", dest="enable", action="store_false")
+    ctoggle.add_argument("--confirm", action="store_true", help="autorisation explicite requise pour un connecteur expérimental (T5.1)")
+    ctoggle.set_defaults(func=_cmd_connector_toggle)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))
