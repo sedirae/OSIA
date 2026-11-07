@@ -10,6 +10,8 @@ sur adaptateur simulé ; workflow CI présent et câblé sur les PR."""
 import json
 import pathlib
 
+import pytest
+
 from osia.ai.eval import EVAL_CASES, EvalCase, evaluate_adapter, extraction_metrics, scripted_adapter_for_cases
 from osia.ai.schemas import Extraction
 from osia.recette import SCENARIOS, run_all, run_scenario
@@ -37,6 +39,7 @@ async def test_recette_happy_path_releve_reel(engine):
     assert releve["source_calls"] == ["requete-1"]  # un seul appel source simulé
     assert isinstance(releve["duration_ms"], int) and releve["duration_ms"] >= 0
     assert releve["budget"] is not None
+    assert isinstance(releve["budget"], dict)  # BudgetView sérialisé en objet JSON exploitable
     json.dumps(releve, default=str)  # relevé sérialisable
 
 
@@ -79,13 +82,26 @@ async def test_recette_isolation_entre_investigations(engine):
 
 
 async def test_recette_run_all_rejouable(engine):
-    """Tous les scénarios rejoués dans l'ordre déterministe, relevés par scénario."""
+    """Tous les scénarios rejoués dans l'ordre déterministe, relevés par scénario. Chaque
+    scénario produit son résultat attendu DANS le lot (le cache source B-ACC-06 est
+    réinitialisé entre scénarios : un hit cache court-circuiterait la chaîne)."""
     releves = await run_all(engine)
     assert sorted(releves.keys()) == sorted(SCENARIOS.keys())
     for name, releve in releves.items():
         assert releve["scenario"] == name
         assert releve["offline"] is True
         json.dumps(releve, default=str)
+    assert releves["happy_path"]["stop_reason"] == "objective_suffisamment_etaye"
+    assert releves["happy_path"]["proofs"] >= 1
+    assert releves["arret_utilisateur"]["stop_reason"] == "user_interrupt"
+    assert releves["isolation"]["isolation"]["separated"] is True
+
+
+async def test_recette_moteur_non_demarre_erreur_propre(engine):
+    """Edge case : manage_engine=False sur un moteur non démarré -> erreur explicite plutôt
+    qu'un relevé dégénéré (tâches bloquées, arrêt forcé après timeout)."""
+    with pytest.raises(RuntimeError, match="moteur non démarré"):
+        await run_scenario(engine, "happy_path", manage_engine=False)
 
 
 # ---------- Évaluation IA par tâche (T8.10) ----------

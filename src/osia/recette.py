@@ -12,8 +12,9 @@ CLI : `osia recette run [--scenario NOM|all] [--out DIR]`.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from typing import Any, Optional
+from typing import Any
 
 from .models import CreateInvestigationRequest, StopReason
 
@@ -113,9 +114,7 @@ async def _releve_investigation(engine, inv_id: str) -> dict[str, Any]:
     for row in entities:
         data = row["data"]
         if isinstance(data, str):
-            import json as _json
-
-            data = _json.loads(data)
+            data = json.loads(data)
         names.append(data.get("name", "?"))
     return {
         "investigation_id": inv_id,
@@ -125,16 +124,22 @@ async def _releve_investigation(engine, inv_id: str) -> dict[str, Any]:
         "proofs": len(proofs),
         "entities": sorted(names),
         "events": [e.type for e in events],
-        "budget": budget,
+        "budget": budget.model_dump(),  # BudgetView -> dict JSON-native (relevé exploitable)
     }
 
 
 async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: bool = True) -> dict[str, Any]:
     """Exécute un scénario de bout en bout, HORS LIGNE (simulations uniquement), et retourne
     le relevé de résultats réels de l'exécution. `manage_engine=False` : le moteur est déjà
-    démarré (lot de scénarios via `run_all`) et reste en marche."""
+    démarré (lot de scénarios via `run_all`) et reste en marche. Rejouable : des appels
+    successifs sur le même moteur redémarrent l'ordonnanceur proprement."""
     if name not in SCENARIOS:
         raise KeyError(f"scénario inconnu: {name} (disponibles: {', '.join(sorted(SCENARIOS))})")
+    if not manage_engine and (getattr(engine, "_runner", None) is None or engine._runner.done()):
+        raise RuntimeError(
+            "moteur non démarré (manage_engine=False) : appeler engine.start() avant de rejouer un scénario, "
+            "ou utiliser manage_engine=True / run_all"
+        )
     spec = SCENARIOS[name]
     adapter = engine.broker.adapters["simulated"]
     adapter.scripted = spec["scripted"]
@@ -143,13 +148,23 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
     connector.fixtures = spec.get("fixtures", {})
     connector.fail_on = set(spec.get("fail_on", []))
     connector.calls.clear()
+    # Rejouabilité (T3.14) : le cache technique des requêtes source (B-ACC-06) est réinitialisé
+    # avant chaque scénario — un hit cache court-circuite la chaîne (pas de preuve, pas de
+    # tâche synthesize) et casserait le relevé comme la comparaison entre exécutions.
+    await engine.pool.execute("DELETE FROM source_cache")
     started = time.monotonic()
     if manage_engine:
+        # Rejouabilité (T3.14) : scheduler.stop() est définitif — après un premier
+        # run_scenario/run_all sur ce moteur, l'événement d'arrêt doit être réarmé pour
+        # que le nouveau runner ordonnance réellement (sinon relevé dégénéré).
+        engine.scheduler.reset_stop()
         await engine.start()
+    inv_ids: set[str] = set()
     try:
         inv = await engine.orchestrator.start_investigation(
             CreateInvestigationRequest(title=spec["title"], objective=spec["objective"], profile_id=spec.get("profile_id", "rapide"))
         )
+        inv_ids.add(inv["id"])
         if spec.get("stop_user"):
             await asyncio.sleep(0.3)  # laisser l'investigation démarrer
             await engine.orchestrator.stop(inv["id"], StopReason.USER)
@@ -163,6 +178,7 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
             inv2 = await engine.orchestrator.start_investigation(
                 CreateInvestigationRequest(title=spec["title"] + " (2)", objective=spec["objective"], profile_id="rapide")
             )
+            inv_ids.add(inv2["id"])
             final2 = await _wait_state(engine, inv2["id"], {"stopped", "error"}, timeout)
             if final2["state"] not in ("stopped", "error"):
                 await engine.orchestrator.stop(inv2["id"], StopReason.USER)
@@ -184,7 +200,8 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
             "offline": True,  # connecteur + IA simulés : aucun appel réseau, aucune dépense
             "source_calls": list(connector.calls),
             "ai_calls": [{"role": c["role"]} for c in adapter.calls],
-            "techlog_events": [e["event"] for e in engine.techlog.read(limit=500)],
+            # entrées du journal technique de CE scénario (par investigation, pas cumul global)
+            "techlog_events": [e["event"] for e in engine.techlog.read(limit=500) if e.get("investigation_id") in inv_ids],
             "duration_ms": int((time.monotonic() - started) * 1000),
         }
     )
@@ -193,7 +210,9 @@ async def run_scenario(engine, name: str, timeout: float = 6.0, manage_engine: b
 
 async def run_all(engine, timeout: float = 6.0) -> dict[str, dict[str, Any]]:
     """Rejoue TOUS les scénarios (ordre déterministe) sur un moteur démarré une seule fois,
-    et retourne les relevés par scénario."""
+    et retourne les relevés par scénario. Le moteur est arrêté en fin de lot ; un nouvel
+    appel réarme l'ordonnanceur (rejouabilité)."""
+    engine.scheduler.reset_stop()  # scheduler.stop() est définitif (T3.14, rejouabilité)
     await engine.start()
     try:
         return {name: await run_scenario(engine, name, timeout=timeout, manage_engine=False) for name in sorted(SCENARIOS)}
