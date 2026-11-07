@@ -115,6 +115,9 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stopping.set()
+        # F04 : l'arrêt annule aussi les runners déjà lancés (pas seulement la boucle de claim)
+        for runner in list(self._pending):
+            runner.cancel()
 
     def reset_stop(self) -> None:
         """Réarme l'événement d'arrêt pour un nouveau cycle `run_forever` dans le même process.

@@ -123,7 +123,12 @@ class Settings:
     ai_timeout_seconds: int = 60  # V1.4 : 60 s max par appel IA
     mistral_api_base: str = "https://api.mistral.ai/v1"
     mistral_model: str = "mistral-small-2603"
-    mistral_cost_cents: int = 5  # borne estimée par appel (T8.4 : réservation avant l'appel)
+    mistral_cost_cents: int = 5  # borne forfaitaire de repli si les tarifs token ne sont pas connus (T8.4)
+    # Tarifs token (centimes d'euro par million de tokens) pour borner et constater les coûts réels
+    # (audit F03, T8.4/T8.5) ; None = non bornable par token -> repli sur mistral_cost_cents.
+    mistral_input_cents_per_mtok: int | None = 20
+    mistral_output_cents_per_mtok: int | None = 60
+    ai_max_output_tokens: int = 4096  # plafond de tokens de sortie envoyé au fournisseur (borne)
     paths: Paths = field(default_factory=Paths.from_env)
 
     @classmethod
@@ -178,6 +183,15 @@ class Settings:
         mcost = os.environ.get("OSIA_MISTRAL_COST_CENTS")
         if mcost:
             settings.mistral_cost_cents = int(mcost)
+        minput = os.environ.get("OSIA_MISTRAL_INPUT_CENTS_PER_MTOK")
+        if minput:
+            settings.mistral_input_cents_per_mtok = int(minput)
+        moutput = os.environ.get("OSIA_MISTRAL_OUTPUT_CENTS_PER_MTOK")
+        if moutput:
+            settings.mistral_output_cents_per_mtok = int(moutput)
+        mout = os.environ.get("OSIA_AI_MAX_OUTPUT_TOKENS")
+        if mout:
+            settings.ai_max_output_tokens = int(mout)
         return settings
 
     @property

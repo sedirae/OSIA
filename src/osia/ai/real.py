@@ -93,11 +93,18 @@ class ChatCompletionsAdapter(AIAdapter):
         netguard: Optional[NetworkGuard] = None,
         fetch_fn: Optional[PostFetchFn] = None,
         timeout_seconds: int = 60,
+        input_cents_per_mtok: Optional[int] = None,
+        output_cents_per_mtok: Optional[int] = None,
+        max_output_tokens: Optional[int] = None,
     ):
         self.provider = provider
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.input_cents_per_mtok = input_cents_per_mtok
+        self.output_cents_per_mtok = output_cents_per_mtok
+        self.max_output_tokens = max_output_tokens
+        self.last_usage: Optional[dict[str, Any]] = None  # usage du dernier appel (T8.5, F03)
         self.paid = paid
         self.cost_per_call_cents = cost_per_call_cents
         self.netguard = netguard
@@ -135,7 +142,7 @@ class ChatCompletionsAdapter(AIAdapter):
             return await self.netguard.guarded_request(fetch, url)
         return await fetch(url)
 
-    async def complete(self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]) -> T:
+    def _payload(self, prompt: str, input_data: dict[str, Any]) -> dict:
         payload = {
             "model": self.model,
             "messages": [
@@ -145,6 +152,39 @@ class ChatCompletionsAdapter(AIAdapter):
             "response_format": {"type": "json_object"},
             "temperature": 0,
         }
+        # F03 / T8.4 : plafond de tokens de sortie envoyé au fournisseur (borne garantie côté API)
+        if self.max_output_tokens:
+            payload["max_tokens"] = self.max_output_tokens
+        return payload
+
+    def estimate_cost_cents(self, input_tokens: int, max_output_tokens: Optional[int]) -> Optional[int]:
+        """Borne de coût calculée depuis les tarifs token (T8.4, F03) : entrée estimée + plafond
+        de sortie. Repli sur le forfait `cost_per_call_cents` si les tarifs sont inconnus ;
+        None si aucune borne n'est possible."""
+        if self.input_cents_per_mtok is not None and self.output_cents_per_mtok is not None:
+            out = max_output_tokens or self.max_output_tokens or 0
+            return -(-(input_tokens * self.input_cents_per_mtok + out * self.output_cents_per_mtok) // 1_000_000)  # ceil
+        return self.cost_per_call_cents
+
+    def actual_cost_cents(self, usage: Optional[dict[str, Any]]) -> Optional[int]:
+        """Coût constaté depuis l'usage réel (T8.5, F03) ; None si l'usage est absent (à réconcilier,
+        jamais remplacé silencieusement par l'estimation)."""
+        if usage and self.input_cents_per_mtok is not None and self.output_cents_per_mtok is not None:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            return -(-(prompt_tokens * self.input_cents_per_mtok + completion_tokens * self.output_cents_per_mtok) // 1_000_000)
+        if usage is None:
+            return None
+        return self.cost_per_call_cents if self.paid else None
+
+    async def complete(self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]) -> T:
+        output, _usage = await self.complete_with_usage(role, prompt, input_data, response_model)
+        return output
+
+    async def complete_with_usage(
+        self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]
+    ) -> tuple[T, Optional[dict[str, Any]]]:
+        payload = self._payload(prompt, input_data)
         status, _, body = await self._post(self.completions_url, payload)
         if status != 200:
             raise AIAdapterError(f"fournisseur {self.provider} : HTTP {status}", status=status)
@@ -153,12 +193,14 @@ class ChatCompletionsAdapter(AIAdapter):
             content = data["choices"][0]["message"]["content"]
         except (json.JSONDecodeError, KeyError, IndexError, TypeError, UnicodeDecodeError) as exc:
             raise AIAdapterError(f"fournisseur {self.provider} : réponse illisible (pas de choices[0].message.content)", status=status) from exc
+        # T8.5 / F03 : l'usage est conservé même si la sortie métier est ensuite rejetée
+        self.last_usage = data.get("usage") if isinstance(data, dict) else None
         try:
             parsed = json.loads(content)
         except (json.JSONDecodeError, TypeError) as exc:  # TypeError : content null ou non str
             raise AIAdapterError(f"fournisseur {self.provider} : sortie non JSON (T8.6)", status=status) from exc
         # ValidationError propagée : le courtier rejette la sortie (T8.6, sortie_ia_invalide)
-        return response_model.model_validate(parsed)
+        return response_model.model_validate(parsed), self.last_usage
 
     async def ping(self) -> dict:
         """Test de connexion explicite (D2 §4.2) : GET /models — listing non facturé, aucun prompt
@@ -184,7 +226,8 @@ class MistralCloudAdapter(ChatCompletionsAdapter):
     Le coût par appel est une BORNE estimée (T8.4 : réservation avant l'appel) ; configurable."""
 
     def __init__(self, *, api_key: str, model: str = DEFAULT_MISTRAL_MODEL, base_url: str = DEFAULT_MISTRAL_API_BASE,
-                 cost_per_call_cents: int = 5, **kw):
+                 cost_per_call_cents: int = 5, input_cents_per_mtok: Optional[int] = 20,
+                 output_cents_per_mtok: Optional[int] = 60, max_output_tokens: Optional[int] = 4096, **kw):
         super().__init__(
             provider="mistral",
             model=model,
@@ -192,6 +235,9 @@ class MistralCloudAdapter(ChatCompletionsAdapter):
             api_key=api_key,
             paid=True,
             cost_per_call_cents=cost_per_call_cents,
+            input_cents_per_mtok=input_cents_per_mtok,
+            output_cents_per_mtok=output_cents_per_mtok,
+            max_output_tokens=max_output_tokens,
             **kw,
         )
 
@@ -233,6 +279,9 @@ def build_ai_adapters(settings: Settings, secrets: Optional[SecretStore]) -> tup
             model=settings.mistral_model,
             base_url=settings.mistral_api_base,
             cost_per_call_cents=settings.mistral_cost_cents,
+            input_cents_per_mtok=settings.mistral_input_cents_per_mtok,
+            output_cents_per_mtok=settings.mistral_output_cents_per_mtok,
+            max_output_tokens=settings.ai_max_output_tokens,
             timeout_seconds=settings.ai_timeout_seconds,
         )
         host = urlparse(settings.mistral_api_base).hostname

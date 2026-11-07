@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
 
 from ..ids import new_id
-from ..models import OpKind, PolicyDeny
+from ..models import LimitSet, OpKind, PolicyDeny
 from .budgets import BudgetManager
 from .limits import limits_from_record
+
+# États comptés contre les quotas : toute opération admise (y compris 'authorized' pas encore
+# réservée) compte ; seules les opérations terminales sans envoi (failed/cancelled) sont exclues.
+_COUNTED_OP_STATES = ("authorized", "reserved", "in_flight", "completed", "uncertain", "reconciled")
+
+
+def _merge_limits_min(a: LimitSet, b: LimitSet) -> LimitSet:
+    """Limites effectives = minimum champ par champ (branche ne peut que resserrer, D3 §5.4)."""
+    return LimitSet(**{f: min(getattr(a, f), getattr(b, f)) for f in LimitSet.model_fields})
 
 
 @dataclass
@@ -49,46 +59,69 @@ class PolicyEngine:
         task_id: Optional[str] = None,
         depth: int = 0,
     ) -> Decision:
+        # F04 : admission ATOMIQUE — verrou de ligne sur l'investigation (et la branche) dans une
+        # transaction : le comptage des quotas et l'insert de l'opération sont sérialisés, deux
+        # tâches concurrentes ne peuvent pas passer le même quota.
         async with self.pool.acquire() as conn:
-            inv = await conn.fetchrow("SELECT * FROM investigations WHERE id = $1", investigation_id)
-            if inv is None:
-                return Decision(allowed=False, reason="investigation_inconnue")
-            if inv["state"] != "running":
-                return Decision(allowed=False, reason=f"investigation_non_active:{inv['state']}")
-            limits = limits_from_record(inv)
-            if kind == OpKind.SOURCE_REQUEST:
-                done = await conn.fetchval(
-                    "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'source_request' "
-                    "AND state IN ('reserved','in_flight','completed','reconciled')",
-                    investigation_id,
+            async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
                 )
-                if int(done) >= limits.max_source_requests:
-                    return Decision(allowed=False, reason="plafond_requetes_source_atteint")
-                timeout = limits.http_timeout_seconds
-            else:
-                done = await conn.fetchval(
-                    "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'ai_call' "
-                    "AND state IN ('reserved','in_flight','completed','reconciled')",
+                if inv is None:
+                    return Decision(allowed=False, reason="investigation_inconnue")
+                if inv["state"] != "running":
+                    return Decision(allowed=False, reason=f"investigation_non_active:{inv['state']}")
+                limits = limits_from_record(inv)
+                if branch_id:
+                    # F04 : la branche doit exister, appartenir à l'investigation et être active ;
+                    # ses limites s'appliquent à TOUTES les opérations (pas seulement payantes).
+                    br = await conn.fetchrow(
+                        "SELECT * FROM branches WHERE id = $1 AND investigation_id = $2 FOR UPDATE",
+                        branch_id,
+                        investigation_id,
+                    )
+                    if br is None:
+                        return Decision(allowed=False, reason="branche_inconnue")
+                    if br["state"] != "running":
+                        return Decision(allowed=False, reason=f"branche_non_active:{br['state']}")
+                    limits = _merge_limits_min(limits, limits_from_record(br))
+                # F04 : échéance persistante — durée écoulée depuis created_at vs max_duration_seconds
+                elapsed = (datetime.now(timezone.utc) - inv["created_at"].astimezone(timezone.utc)).total_seconds()
+                if elapsed > limits.max_duration_seconds:
+                    return Decision(allowed=False, reason="duree_max_atteinte")
+                if kind == OpKind.SOURCE_REQUEST:
+                    done = await conn.fetchval(
+                        "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'source_request' "
+                        "AND state IN ('authorized','reserved','in_flight','completed','uncertain','reconciled')",
+                        investigation_id,
+                    )
+                    if int(done) >= limits.max_source_requests:
+                        return Decision(allowed=False, reason="plafond_requetes_source_atteint")
+                    timeout = limits.http_timeout_seconds
+                else:
+                    done = await conn.fetchval(
+                        "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'ai_call' "
+                        "AND state IN ('authorized','reserved','in_flight','completed','uncertain','reconciled')",
+                        investigation_id,
+                    )
+                    if int(done) >= limits.max_ai_calls:
+                        return Decision(allowed=False, reason="plafond_appels_ia_atteint")
+                    timeout = limits.ai_timeout_seconds
+                if depth > limits.max_rebonds:
+                    return Decision(allowed=False, reason="profondeur_max_atteinte")
+                if target not in self.authorized_targets:
+                    return Decision(allowed=False, reason="cible_non_autorisee")
+                op = await conn.fetchrow(
+                    "INSERT INTO external_ops (id, task_id, investigation_id, kind, target, is_paid, cost_estimated_cents, state) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, 'authorized') RETURNING *",
+                    new_id("op"),
+                    task_id,
                     investigation_id,
+                    kind.value,
+                    target,
+                    is_paid,
+                    cost_estimated_cents,
                 )
-                if int(done) >= limits.max_ai_calls:
-                    return Decision(allowed=False, reason="plafond_appels_ia_atteint")
-                timeout = limits.ai_timeout_seconds
-            if depth > limits.max_rebonds:
-                return Decision(allowed=False, reason="profondeur_max_atteinte")
-            if target not in self.authorized_targets:
-                return Decision(allowed=False, reason="cible_non_autorisee")
-            op = await conn.fetchrow(
-                "INSERT INTO external_ops (id, task_id, investigation_id, kind, target, is_paid, cost_estimated_cents, state) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, 'authorized') RETURNING *",
-                new_id("op"),
-                task_id,
-                investigation_id,
-                kind.value,
-                target,
-                is_paid,
-                cost_estimated_cents,
-            )
         reservation_id: Optional[str] = None
         if is_paid:
             if cost_estimated_cents is None:
@@ -184,3 +217,81 @@ class PolicyEngine:
             "WHERE id = $1 AND state IN ('reserved','in_flight')",
             op_id,
         )
+
+    async def revalidate(self, op_id: str, *, investigation_id: str) -> Decision:
+        """Revalidation ATOMIQUE immédiatement avant l'I/O (F04) : l'opération doit exister dans un
+        état envoyable, l'investigation doit être active et l'échéance non dépassée. Si refusée,
+        l'appelant ne doit PAS exécuter l'opération (attente de sémaphore incluse)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                op = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
+                if op is None:
+                    return Decision(allowed=False, reason="operation_inconnue")
+                if op["state"] not in ("authorized", "reserved"):
+                    return Decision(allowed=False, reason=f"operation_non_envoyable:{op['state']}")
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if inv is None:
+                    return Decision(allowed=False, reason="investigation_inconnue")
+                if inv["state"] != "running":
+                    return Decision(allowed=False, reason=f"investigation_non_active:{inv['state']}")
+                limits = limits_from_record(inv)
+                elapsed = (datetime.now(timezone.utc) - inv["created_at"].astimezone(timezone.utc)).total_seconds()
+                if elapsed > limits.max_duration_seconds:
+                    return Decision(allowed=False, reason="duree_max_atteinte")
+                return Decision(
+                    allowed=True,
+                    op_id=op_id,
+                    reservation_id=op["reservation_id"],
+                    timeout_seconds=limits.ai_timeout_seconds if op["kind"] == "ai_call" else limits.http_timeout_seconds,
+                )
+
+    async def cancel_op(self, op_id: str, *, reason: str = "annule_avant_envoi") -> None:
+        """Opération JAMAIS envoyée (authorized/reserved) : état 'cancelled' + libération de
+        l'enveloppe budgétaire (F04 : distinguer jamais-envoyé [libérable] et envoyé [réconciliation])."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
+                if row is None or row["state"] not in ("authorized", "reserved"):
+                    return
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'cancelled', error = $2, updated_at = now() WHERE id = $1",
+                    op_id,
+                    reason,
+                )
+                reservation_id = row["reservation_id"]
+        if reservation_id:
+            await self.budgets.release(reservation_id, note=f"annulation avant envoi ({reason})")
+
+    async def fail_op_billed(self, op_id: str, error: str, *, actual_cents: int) -> None:
+        """Opération échouée MAIS envoyée et facturée (ex. sortie IA invalide après l'appel, F03) :
+        état 'failed' + consommation RÉELLE constatée au registre (l'estimation n'est jamais
+        présentée comme montant constaté)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
+                if row is None:
+                    return
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'failed', error = $2, updated_at = now() WHERE id = $1",
+                    op_id,
+                    error,
+                )
+                reservation_id = row["reservation_id"]
+        if reservation_id:
+            await self.budgets.consume(reservation_id, actual_cents)
+
+    async def complete_op_uncertain(self, op_id: str, result: dict) -> None:
+        """Appel terminé mais facturation INCONNUE (pas d'usage, F03) : résultat persisté, état
+        'uncertain' — la réservation reste à réconcilier explicitement (jamais relancé aveuglément)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
+                if row is None:
+                    return
+                await conn.execute(
+                    "UPDATE external_ops SET state = 'uncertain', result = $2::jsonb, updated_at = now() WHERE id = $1",
+                    op_id,
+                    json.dumps(result, ensure_ascii=False, default=str),
+                )

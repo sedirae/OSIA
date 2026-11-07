@@ -146,9 +146,10 @@ class Event(BaseModel):
 
 
 class BudgetView(BaseModel):
-    estimated_cents: int
+    estimated_cents: int  # devis des opérations admises non encore constatées (jamais présenté comme consommé, F03)
     reserved_cents: int
-    consumed_cents: int
+    consumed_cents: int  # constaté au registre (usage réel, T8.5)
+    uncertain_cents: int = 0  # enveloppes d'opérations envoyées dont la facturation est à réconcilier (F03)
     available_cents: int
     caps: dict[str, int]
     warnings: list[str] = Field(default_factory=list)  # D3 §5.4 : avertissements à l'approche d'un plafond
