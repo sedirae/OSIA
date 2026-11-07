@@ -1,22 +1,35 @@
 # OSIA — Recette applicative : matrice de traçabilité et résultats d'exécution
 
-**Exécutée le 07/11/2026.** Conformément à `CADRAGE/RECETTE.md` §5, chaque scénario de référence est consigné avec la vérification réellement exécutée et son résultat.
+**Exécutée le 07/11/2026, re-exécutée le 07/11/2026 sur le commit `310afb9a7b3634da746837e9962bfe1aead799d8`** (branche `vibe/qualification-f16-673a5cc2`, audit #17 F16). Conformément à `CADRAGE/RECETTE.md` §5, chaque scénario de référence est consigné avec la vérification réellement exécutée et son résultat.
 
 ## 1. Environnement et procédure (reproductibles, hors ligne)
 
-- **Environnement** : Linux, Python 3.12, venv `.venv`, PostgreSQL embarqué (`pgserver`, aucune instance externe), aucun accès réseau, aucun secret, aucune dépense API (connecteurs et IA simulés).
-- **Procédure** : `.venv/bin/pytest -v --tb=no` (170 tests collectés) + `osia recette run` (5 scénarios de bout en bout, relevés JSON, CON-19) + `osia ai eval --adapter simulated` (jeu de cas embarqué, T8.10).
-- **Résultat global du run pytest** : **169 PASSED, 1 FAILED** — le FAILED est `test_budgets.py::test_concurrent_reservations_cannot_exceed_cap`, test flaky pré-existant qui échoue aussi sur `main` (documenté CONCEPTION/14 §6, non traité).
+- **Environnement** : Linux, Python 3.12, venv `.venv`, PostgreSQL embarqué (`pgserver`, aucune instance externe), aucun accès réseau (résolveurs DNS injectés dans tous les tests réseau — audit F16), aucun secret, aucune dépense API (connecteurs et IA simulés).
+- **Procédure** : `.venv/bin/pytest -v --tb=no` (256 tests collectés) + `osia recette run` (5 scénarios de bout en bout, relevés JSON, CON-19) + `osia ai eval --adapter simulated` (jeu de cas embarqué, T8.10).
+- **Résultat global du run pytest (commit `310afb9`)** : **256 PASSED, 0 FAILED, aucune désélection** — la CI (`.github/workflows/ci.yml`) rejoue désormais la suite complète sans `--deselect` (audit F16). Le run historique du 07/11/2026 (169 PASSED / 1 FAILED) est clos : le FAILED (`test_concurrent_reservations_cannot_exceed_cap`) n'était pas « flaky » mais un scénario incohérent (plafond demandé 10 clampé à 5 par le profil « rapide ») — corrigé en profil « approfondi » et réactivé (voir §8).
 - **Recettes CON-19** : 5/5 scénarios rejoués hors ligne avec relevés de résultats réels (`tests/test_con19.py`, 11 tests PASSED).
 
 ## 2. Synthèse de couverture (156 scénarios de référence)
 
+**Niveaux de preuve** (audit F16 : aucun critère n'est déclaré couvert sur un smoke test insuffisant) :
+
+| Niveau | Signification |
+| --- | --- |
+| `code` | présence du code uniquement (aucune exécution) |
+| `unitaire` | test unitaire exécuté |
+| `intégration` | test d'intégration exécuté (API/moteur/base embarquée) |
+| `navigateur` | test navigateur réel (Playwright) — **aucun en V1**, voir §8 |
+| `smoke` | chargement/smoke JS uniquement : prouve la présence et le chargement, PAS le comportement interactif |
+| `partiel` | critère qualitatif (perf/seuil) non simulé |
+| `documentaire` | vérifié par inspection documentaire |
+| `qualification externe` | à réaliser par le porteur hors CI |
+
 | Couverture | Nombre | Scénarios |
 | --- | --- | --- |
-| Tests exécutés PASSED | 142 | voir tables ci-dessous |
-| Tests exécutés avec 1 flaky pré-existant (reste PASSED) | 3 | B-ACC-10, AC-T3-11, AC-T8-04 |
+| Tests exécutés PASSED (unitaire/intégration) | 145 | voir tables ci-dessous |
+| Smoke JS seul (comportement interactif non couvert) | 1 | REC-C-08 |
 | Partiel (perf/seuil qualitatif non simulé) | 5 | AC-T2-05, AC-T2-08, AC-T6-09, REC-C-02, REC-C-09 |
-| Hors périmètre V1 (reporté) | 2 | AC-T5-03, B-ACC-04 |
+| Hors périmètre V1 (reporté — décision porteur requise, §8) | 2 | AC-T5-03, B-ACC-04 |
 | Documentaire (pyproject : Python seul, pas de Rust) | 2 | AC-EXEC-07, AC-T3-01 |
 | Non couvert (critère qualitatif / évolution ultérieure) | 2 | AC-EXEC-06, S02 |
 
@@ -27,13 +40,13 @@
 | B-ACC-01 | [B](../CADRAGE/LOTS/B.md) — Un connecteur peut être désactivé sans bloquer les autres. | test_con06::test_api_net_secrets_connectors | test | PASSED (1/1) |
 | B-ACC-02 | [B](../CADRAGE/LOTS/B.md) — Un connecteur ajouté via le contrat commun est exploitable sans modifier la logique métier centrale. | test_con0708::test_build_real_connectors_quatre_connecteurs_v12, test_con0708::test_engine_enregistre_connecteurs_reels | test | PASSED (2/2) |
 | B-ACC-03 | [B](../CADRAGE/LOTS/B.md) — Une recherche peut mobiliser plusieurs familles de sources et plusieurs modes autorisés. | test_con0708::test_build_real_connectors_quatre_connecteurs_v12 | test | PASSED (1/1) |
-| B-ACC-04 | [B](../CADRAGE/LOTS/B.md) — Un navigateur avancé n'est invoqué que si son usage est justifié, permis et budgété. | aucun navigateur avancé en V1 (PERIMETRE-V1 V1.2) — connecteur web par URL uniquement (test_con0708.py) | hors périmètre V1 | — |
+| B-ACC-04 | [B](../CADRAGE/LOTS/B.md) — Un navigateur avancé n'est invoqué que si son usage est justifié, permis et budgété. | aucun navigateur avancé en V1 — connecteur web par URL uniquement (test_con0708.py) ; écart de périmètre soumis à décision du porteur (F16, §8) | hors périmètre V1 | — |
 | B-ACC-05 | [B](../CADRAGE/LOTS/B.md) — L'IA ne peut lancer directement un appel refusé par le contrôleur indépendant. | test_ai_broker::test_paid_call_without_budget_is_denied, test_ai_broker::test_unauthorized_fallback_is_not_used | test | PASSED (2/2) |
 | B-ACC-06 | [B](../CADRAGE/LOTS/B.md) — Une requête équivalente déjà satisfaite peut réutiliser un résultat valide plutôt que générer un nouvel appel. | test_con13::test_handler_reutilise_cache_sans_nouvel_appel | test | PASSED (1/1) |
 | B-ACC-07 | [B](../CADRAGE/LOTS/B.md) — Une simple adresse commune n'est jamais étiquetée automatiquement « affiliation démontrée ». | test_graph::test_exact_identifier_attaches_but_name_alone_does_not_merge | test | PASSED (1/1) |
 | B-ACC-08 | [B](../CADRAGE/LOTS/B.md) — Une conclusion affichée peut être reliée aux éléments sources et à leur période de validité. | test_graph::test_api_graph_endpoints, test_exchange::test_import_roundtrip_with_relation_dates | test | PASSED (2/2) |
 | B-ACC-09 | [B](../CADRAGE/LOTS/B.md) — Deux versions historiques compatibles d'une information ne sont pas nécessairement considérées contradictoires. | test_graph::test_confidence_is_multidimensional_and_qualitative | test | PASSED (1/1) |
-| B-ACC-10 | [B](../CADRAGE/LOTS/B.md) — Deux opérations simultanées ne peuvent réserver la même portion de budget disponible. | test_budgets::test_concurrent_reservations_cannot_exceed_cap, test_budgets::test_reserve_is_idempotent | test | PASSED (1/2) + 1 FAILED flaky pré-existant (échoue aussi sur main) |
+| B-ACC-10 | [B](../CADRAGE/LOTS/B.md) — Deux opérations simultanées ne peuvent réserver la même portion de budget disponible. | test_budgets::test_concurrent_reservations_cannot_exceed_cap (corrigé F16 : profil « approfondi », plafond 10 non clampé), test_budgets::test_reserve_is_idempotent | test | PASSED (2/2) |
 | B-ACC-11 | [B](../CADRAGE/LOTS/B.md) — Une opération payante dont le risque de dépassement n'est pas maîtrisé n'est pas exécutée automatiquement. | test_ai_broker::test_paid_call_with_unknown_cost_is_blocked | test | PASSED (1/1) |
 | B-ACC-12 | [B](../CADRAGE/LOTS/B.md) — Une API défaillante est isolée et peut être remplacée par une alternative autorisée. | test_con0708::test_health_suspendu_si_indisponible_ou_desactive, test_ai_broker::test_authorized_fallback_used | test | PASSED (2/2) |
 | B-ACC-13 | [B](../CADRAGE/LOTS/B.md) — Une correction sensible de connecteur ne peut être activée en production sans validation explicite. | test_con06::test_connecteur_experimental_desactive_par_defaut | test | PASSED (1/1) |
@@ -47,7 +60,7 @@
 | REC-C-05 | [C](../CADRAGE/LOTS/C.md) — Atteindre une limite ou arrêter la recherche. | test_orchestrator::test_stop_cancels_queued_tasks, test_web::test_web_pages_available_while_investigation_runs | test | PASSED (2/2) |
 | REC-C-06 | [C](../CADRAGE/LOTS/C.md) — Cliquer une conclusion de synthèse. | test_report::test_html_embedded_js_renders_and_escapes | test | PASSED (1/1) |
 | REC-C-07 | [C](../CADRAGE/LOTS/C.md) — Afficher un lien hypothétique et un lien documenté. | test_graph::test_api_graph_endpoints | test | PASSED (1/1) |
-| REC-C-08 | [C](../CADRAGE/LOTS/C.md) — Appliquer un filtre de graphe puis le supprimer. | test_web::test_app_js_smoke_node | test | PASSED (1/1) |
+| REC-C-08 | [C](../CADRAGE/LOTS/C.md) — Appliquer un filtre de graphe puis le supprimer. | test_web::test_app_js_smoke_node (smoke : chargement uniquement, interaction non testée — reclassé F16) | smoke | PASSED (1/1) — comportement interactif non couvert |
 | REC-C-09 | [C](../CADRAGE/LOTS/C.md) — Développer un graphe très fourni. | test_graph::test_api_graph_endpoints | partiel | PASSED (1/1) |
 | REC-C-10 | [C](../CADRAGE/LOTS/C.md) — Lire une fiche présentant deux sources différentes pour deux attributs. | test_graph::test_api_graph_endpoints | test | PASSED (1/1) |
 | REC-C-11 | [C](../CADRAGE/LOTS/C.md) — Examiner deux homonymes. | test_graph::test_exact_identifier_attaches_but_name_alone_does_not_merge | test | PASSED (1/1) |
@@ -123,7 +136,7 @@
 | AC-T3-08 | [T3.8](../CADRAGE/LOTS/T3.md) | Activer une extension déclarant de nouvelles permissions | Manifeste vérifié et autorisation adaptée ; le niveau d’isolation ne repose pas sur un simple sous-processus. | test_con06::test_connecteur_experimental_desactive_par_defaut | test | PASSED (1/1) |
 | AC-T3-09 | [T3.9](../CADRAGE/LOTS/T3.md) | Déclencher un appel modèle depuis chaque composant | Tous passent par le courtier et ses politiques ; aucun contournement par connecteur. | test_ai_broker::test_invalid_structured_output_is_rejected, test_con11::test_api_ai_providers_fallback_test | test | PASSED (2/2) |
 | AC-T3-10 | [T3.10](../CADRAGE/LOTS/T3.md) | Suivre une assertion depuis la sortie jusqu’à la collecte | Original/extrait conservable, normalisation, extraction, interprétation et preuve restent attribuables. | test_graph::test_correct_creates_superseding_assertion_and_keeps_original, test_persistence::test_proof_store_dedup_and_integrity | test | PASSED (2/2) |
-| AC-T3-11 | [T3.11](../CADRAGE/LOTS/T3.md) | Faire concourir deux opérations pour la même enveloppe | Réservations atomiques ; aucun engagement au-delà de la limite ; coût non borné refusé ou soumis à autorisation adaptée. | test_budgets::test_concurrent_reservations_cannot_exceed_cap, test_budgets::test_reserve_is_idempotent | test | PASSED (1/2) + 1 FAILED flaky pré-existant (échoue aussi sur main) |
+| AC-T3-11 | [T3.11](../CADRAGE/LOTS/T3.md) | Faire concourir deux opérations pour la même enveloppe | Réservations atomiques ; aucun engagement au-delà de la limite ; coût non borné refusé ou soumis à autorisation adaptée. | test_budgets::test_concurrent_reservations_cannot_exceed_cap (corrigé F16), test_budgets::test_reserve_is_idempotent | test | PASSED (2/2) |
 | AC-T3-12 | [T3.12](../CADRAGE/LOTS/T3.md) | Simuler indisponibilité, quota, erreur permanente et interruption | Traitements et reprises adaptés, limités ; résultats partiels conservés ; pas de double coût aveugle. | test_scheduler::test_connector_failure_marks_op_uncertain, test_scheduler::test_connector_timeout_applies_limit, test_con19::test_recette_source_indisponible_ne_casse_pas_tout | test | PASSED (3/3) |
 | AC-T3-13 | [T3.13](../CADRAGE/LOTS/T3.md) | Lire les journaux d’une opération et d’une erreur | Identifiants de corrélation, temps, états, durées et coûts utiles présents ; secrets absents ; métriques avancées non présumées livrées. | test_con18::test_techlog_structure_correlation_et_masquage_secrets, test_con18::test_source_query_journalisee_avec_duree | test | PASSED (2/2) |
 | AC-T3-14 | [T3.14](../CADRAGE/LOTS/T3.md) | Exécuter la recette avec substituts de sources et d’IA | Cas unitaires, intégration, contrats, bout en bout et non-régression reproductibles sans facture API. | test_con19::test_recette_run_all_rejouable, test_con19::test_workflow_ci_present_et_cable_sur_pr | test | PASSED (2/2) |
@@ -138,7 +151,7 @@
 | AC-T4-09 | [T4.9](../CADRAGE/LOTS/T4.md) | Observer tâches, découvertes, coûts, erreurs et arrêt | Événements et état accessibles via moteur/API/SSE, y compris sans frontend web. | test_api::test_sse_replay_with_cursor, test_con18::test_engine_ecrit_dans_le_journal_technique | test | PASSED (2/2) |
 | AC-T5-01 | [T5.1](../CADRAGE/LOTS/T5.md) | Activer un connecteur expérimental | Capacités, coûts et permissions déclarés ; autorisation explicite et isolation adaptée. | test_con06::test_connecteur_experimental_desactive_par_defaut | test | PASSED (1/1) |
 | AC-T5-02 | [T5.2](../CADRAGE/LOTS/T5.md) | Tenter un accès fichier/réseau hors périmètre depuis un traitement restreint | Restrictions Linux effectives ; limites CPU/mémoire appliquées ; sous-processus seul non présenté comme sandbox. | test_con06::test_run_isolated_ok, test_con06::test_run_isolated_tue_depassement_cpu | test | PASSED (2/2) |
-| AC-T5-03 | [T5.3](../CADRAGE/LOTS/T5.md) | Rencontrer une page dynamique puis un CAPTCHA | Playwright isolé seulement si justifié/autorisé ; aucun contournement ; téléchargements et provenance contrôlés. | aucun navigateur avancé en V1 (PERIMETRE-V1 V1.2) — connecteur web par URL uniquement (test_con0708.py) | hors périmètre V1 | — |
+| AC-T5-03 | [T5.3](../CADRAGE/LOTS/T5.md) | Rencontrer une page dynamique puis un CAPTCHA | Playwright isolé seulement si justifié/autorisé ; aucun contournement ; téléchargements et provenance contrôlés. | aucun navigateur avancé en V1 — connecteur web par URL uniquement (test_con0708.py) ; écart de périmètre soumis à décision du porteur (F16, §8) | hors périmètre V1 | — |
 | AC-T5-04 | [T5.4](../CADRAGE/LOTS/T5.md) | Suivre une redirection vers une ressource interne non autorisée | Politique réseau centrale bloque ; domaines, volumes, délais et quotas restent contrôlés. | test_con06::test_guarded_request_redirection_ssrf_bloquee, test_con06::test_resolve_and_check_anti_ssrf | test | PASSED (2/2) |
 | AC-T5-05 | [T5.5](../CADRAGE/LOTS/T5.md) | Utiliser puis révoquer une clé, examiner sorties et traces | Cloisonnement et révocation effectifs ; aucune persistance par défaut, aucun secret dans logs, exports ou prompts. | test_con06::test_secret_store_sans_persistance, test_con06::test_secret_store_illisible_n_est_pas_ecrase, test_con18::test_techlog_error_masque_et_fichier_0600 | test | PASSED (3/3) |
 | AC-T5-06 | [T5.6](../CADRAGE/LOTS/T5.md) | Traiter un document contenant des instructions adverses et du contenu actif | Données interprétées comme non fiables ; aucune exécution ni modification des politiques ; traitements restreints. | test_con0708::test_extraction_html_filtre_scripts_et_styles, test_con0708::test_validate_response_detecte_structure_invalide | test | PASSED (2/2) |
@@ -166,7 +179,7 @@
 | AC-T8-01 | [T8.1](../CADRAGE/LOTS/T8.md) | Appeler un modèle cloud puis local depuis plusieurs composants | Courtier unique pour capacités, paramètres, politiques et coûts ; aucune voie directe non supervisée. | test_con11::test_build_ai_adapters_local_et_mistral, test_con11::test_build_ai_adapters_simule_par_defaut | test | PASSED (2/2) |
 | AC-T8-02 | [T8.2](../CADRAGE/LOTS/T8.md) | Affecter toutes les fonctions IA à un seul modèle | Planification/extraction/analyse/synthèse restent des rôles ; plusieurs agents autonomes ne sont pas obligatoires. | test_con11::test_api_ai_providers_fallback_test | test | PASSED (1/1) |
 | AC-T8-03 | [T8.3](../CADRAGE/LOTS/T8.md) | Router une tâche simple et une tâche exigeante | Choix compatible avec qualité, coût, disponibilité, préférences, données autorisées et budget ; aucune baisse silencieuse de qualité. | test_con11::test_build_ai_adapters_local_et_mistral | test | PASSED (1/1) |
-| AC-T8-04 | [T8.4](../CADRAGE/LOTS/T8.md) | Concurrence, timeout, réessai et facture finale divergent de l’estimation | Réservations et réconciliation durables couvrent tous les niveaux ; aucun nouvel engagement non autorisé ; écarts visibles. | test_budgets::test_consume_reconcile_and_release, test_budgets::test_concurrent_reservations_cannot_exceed_cap | test | PASSED (1/2) + 1 FAILED flaky pré-existant (échoue aussi sur main) |
+| AC-T8-04 | [T8.4](../CADRAGE/LOTS/T8.md) | Concurrence, timeout, réessai et facture finale divergent de l’estimation | Réservations et réconciliation durables couvrent tous les niveaux ; aucun nouvel engagement non autorisé ; écarts visibles. | test_budgets::test_consume_reconcile_and_release, test_budgets::test_concurrent_reservations_cannot_exceed_cap (corrigé F16) | test | PASSED (2/2) |
 | AC-T8-05 | [T8.5](../CADRAGE/LOTS/T8.md) | Répéter une analyse compatible puis changer son contexte | Réutilisation possible seulement si pertinente ; invalidation adaptée ; traçabilité conservée et qualité non dégradée silencieusement. | test_con13::test_cache_set_get_et_expiration, test_con13::test_handler_reutilise_cache_sans_nouvel_appel | test | PASSED (2/2) |
 | AC-T8-06 | [T8.6](../CADRAGE/LOTS/T8.md) | Recevoir une réponse IA malformée ou à références invalides | Schéma et références contrôlés avant usage métier ; rejet/correction contrôlée ; réessai soumis aux limites. | test_ai_broker::test_invalid_structured_output_is_rejected, test_con11::test_mistral_sortie_non_json_et_schema_invalide_rejetes, test_con19::test_eval_sortie_invalide_comptee_comme_non_conforme | test | PASSED (3/3) |
 | AC-T8-07 | [T8.7](../CADRAGE/LOTS/T8.md) | Examiner une affirmation générée | Entrées, modèle/version disponible, paramètres, sortie et preuves retracés ; hypothèse non promue automatiquement en fait. | test_con18::test_source_query_journalisee_avec_duree, test_graph::test_correct_creates_superseding_assertion_and_keeps_original | test | PASSED (2/2) |
@@ -191,12 +204,13 @@
 | REC-X-11 | D7, T3.6, T4.7 | Arrêter localement un appel dont le fournisseur ne confirme pas l’état | Statut incertain et réservation traités selon réconciliation ; aucune relance aveugle ni budget supposé libéré. | test_scheduler::test_recover_marks_uncertain_and_suspends, test_scheduler::test_resume_requires_reconciliation_then_works | test | PASSED (2/2) |
 | REC-X-12 | A §20, D7, T4.7 | Redémarrer après crash puis consulter un ancien dossier | Reprise contrôlée de l’opération interrompue ; consultation possible ; aucune surveillance périodique d’ancien dossier activée implicitement. | test_scheduler::test_recover_marks_uncertain_and_suspends, test_persistence::test_crash_simulation_orphan_and_missing | test | PASSED (2/2) |
 
-## 6. Preuves d'exécution
+## 6. Preuves d'exécution (rattachées à un SHA/run — audit F16)
 
-- Run `pytest -v --tb=no` du 07/11/2026 : 169 PASSED / 1 FAILED (flaky pré-existant listé §2). Liste complète des nodeids : `pytest --collect-only -q`.
+- Run `pytest -q` du 07/11/2026 sur le commit `310afb9a7b3634da746837e9962bfe1aead799d8` (branche `vibe/qualification-f16-673a5cc2`) : **256 PASSED / 0 FAILED**, aucune désélection. Liste complète des nodeids : `pytest --collect-only -q`.
+- Run historique du 07/11/2026 (commit audité `e61f578`) : 169 PASSED / 1 FAILED — le FAILED était un scénario de test incohérent, corrigé depuis (F16), et non un défaut « flaky » du moteur.
 - Recettes rejouables hors ligne (CON-19) : `tests/test_con19.py` — 5 scénarios avec relevés JSON réels (état final, tâches, preuves, entités, événements, budget, techlog, durée).
 - Évaluation IA par tâche (T8.10) : `tests/test_con19.py::test_eval_*` — conformité schéma 100 %, F1 extraction 1.0, coût 0 sur adaptateur simulé, reproductible à l'identique.
-- CI : `.github/workflows/ci.yml` rejoue la suite hors ligne sur chaque push/PR vers `main`.
+- CI : `.github/workflows/ci.yml` rejoue la suite complète hors ligne (sans `--deselect`, F16) sur chaque push/PR vers `main`.
 
 ## 7. Données de test
 
@@ -206,8 +220,9 @@ Toutes les données sont des fixtures simulées (connecteur `simulated.web`, ada
 
 - `S02` (objectif biaisé) : critère qualitatif — aucun test automatique ne juge du biais d'un objectif ; le moteur ne modifie pas l'objectif saisi (test_orchestrator vertical).
 - `AC-EXEC-06` (notification de version) : évolution ultérieure ; V1 = mises à jour manuelles avec migrations supervisées (EXEC-06/T1).
-- `B-ACC-04`, `AC-T5-03` : navigateur avancé (Playwright/CAPTCHA) hors périmètre V1 (PERIMETRE-V1 V1.2).
+- `B-ACC-04`, `AC-T5-03` : navigateur avancé (Playwright/CAPTCHA) — **décision du porteur requise** (audit F16) : PERIMETRE-V1 V1.2 prévoit « HTTP en premier, puis Playwright isolé si nécessaire et autorisé » ; le report actuel (connecteur web par URL uniquement, aucun navigateur) est un écart de périmètre qui doit être arbitré explicitement par le porteur, pas absorbé silencieusement. Aucun test navigateur n'existe en V1 (niveau de preuve `navigateur` : 0).
 - `REC-C-02`, `REC-C-09`, `AC-T6-09` : critères de performance qualitatifs (RECETTE §5 : pas d'engagement de latence inventé) — non simulés automatiquement.
 - `AC-T2-05`, `AC-T2-08` : programmation des sauvegardes reportée (V1.1) et seuil disque non simulé ; la sauvegarde manuelle et le nettoyage limité aux éléments purgeables sont couverts.
-- `test_concurrent_reservations_cannot_exceed_cap` : flaky pré-existant (échoue aussi sur `main`), les scénarios B-ACC-10/AC-T3-11/AC-T8-04 restent couverts par les autres tests PASSED du mapping.
+- `test_concurrent_reservations_cannot_exceed_cap` : **résolu (audit F16)** — le scénario demandait un plafond de 10 centimes sur le profil « rapide » plafonné à 5 (clamp 10 → 5), ce qui rendait les attendus incohérents ; le test utilise désormais le profil « approfondi » et est réactivé (plus de désélection CI). B-ACC-10/AC-T3-11/AC-T8-04 : PASSED (2/2).
+- Secrets : `secrets_persist` vaut désormais `False` par défaut (`OSIA_SECRETS_PERSIST=0`, T5.5/D2) — installation neuve = secrets en mémoire uniquement, coffre persistant sur opt-in explicite.
 - Cette matrice consigne des exécutions réelles de tests ; elle ne constitue pas une validation du logiciel par le porteur (cf. avertissement ETAT-PROJET).
