@@ -235,11 +235,13 @@ class BudgetManager:
                 )
                 return row
 
-    async def budget_view(self, investigation_id: str) -> BudgetView:
+    async def budget_view(self, investigation_id: str, branch_id: Optional[str] = None) -> BudgetView:
+        """Vue budgétaire. `branch_id` optionnel (réserve audit PR#19 P3-5) : ajoute alors
+        le scope 'branch' (plafond de la branche + compteurs propres à la branche)."""
         period = _period(datetime.now(timezone.utc))
         async with self.pool.acquire() as conn:
-            caps = await self._caps(conn, investigation_id, None)
-            used = await self._used(conn, investigation_id, None, None, None, period)
+            caps = await self._caps(conn, investigation_id, branch_id)
+            used = await self._used(conn, investigation_id, branch_id, None, None, period)
         reserved = int(
             await self.pool.fetchval(
                 "SELECT COALESCE(SUM(amount_cents), 0) FROM reservations WHERE investigation_id = $1 AND state = 'reserved'",
@@ -296,28 +298,35 @@ class BudgetManager:
         en une transaction. Les opérations envoyées (in_flight) restent à réconcilier ('uncertain')."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                rows = await conn.fetch(
-                    "SELECT DISTINCT reservation_id FROM external_ops "
-                    "WHERE investigation_id = $1 AND state IN ('authorized','reserved','cancelled') AND reservation_id IS NOT NULL",
-                    investigation_id,
-                )
-                released = 0
-                for row in rows:
-                    upd = await conn.fetchrow(
-                        "UPDATE reservations SET state = 'released', updated_at = now() "
-                        "WHERE id = $1 AND state = 'reserved' RETURNING *",
-                        row["reservation_id"],
-                    )
-                    if upd is None:
-                        continue
-                    await conn.execute(
-                        "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
-                        "VALUES ($1, $2, 'released', $3, $4, $5)",
-                        investigation_id,
-                        upd["id"],
-                        -upd["amount_cents"],
-                        _period(upd["created_at"]),
-                        note,
-                    )
-                    released += 1
-                return released
+                return await self.release_ops_reservations_in_conn(conn, investigation_id, note=note)
+
+    async def release_ops_reservations_in_conn(self, conn: asyncpg.Connection, investigation_id: str, *, note: str) -> int:
+        """Variante dans une connexion/transaction appelante (réserve audit PR#19 P3-6 :
+        un crash entre le stop() et cette libération ne doit pas laisser de réservations
+        'reserved' orphelines qui bloqueraient le budget — l'appel est donc DANS la
+        transaction du stop/suspend, pas après)."""
+        rows = await conn.fetch(
+            "SELECT DISTINCT reservation_id FROM external_ops "
+            "WHERE investigation_id = $1 AND state IN ('authorized','reserved','cancelled') AND reservation_id IS NOT NULL",
+            investigation_id,
+        )
+        released = 0
+        for row in rows:
+            upd = await conn.fetchrow(
+                "UPDATE reservations SET state = 'released', updated_at = now() "
+                "WHERE id = $1 AND state = 'reserved' RETURNING *",
+                row["reservation_id"],
+            )
+            if upd is None:
+                continue
+            await conn.execute(
+                "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
+                "VALUES ($1, $2, 'released', $3, $4, $5)",
+                investigation_id,
+                upd["id"],
+                -upd["amount_cents"],
+                _period(upd["created_at"]),
+                note,
+            )
+            released += 1
+        return released

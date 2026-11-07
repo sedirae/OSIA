@@ -149,6 +149,12 @@ class Event(BaseModel):
 
 
 class BudgetView(BaseModel):
+    """Additivité (réserve audit PR#19 P3-4) : pour chaque scope de `caps`,
+    `available_cents = min(cap - used)` avec `used = consumed + reserved` du scope ;
+    `uncertain_cents` est un SOUS-ENSEMBLE de `reserved_cents` (jamais additionné à part) et
+    `estimated_cents` chevauche `reserved_cents` (devis des opérations admises) — ces deux
+    champs sont des ventilations, pas des postes comptables supplémentaires."""
+
     estimated_cents: int  # devis des opérations admises non encore constatées (jamais présenté comme consommé, F03)
     reserved_cents: int
     consumed_cents: int  # constaté au registre (usage réel, T8.5)

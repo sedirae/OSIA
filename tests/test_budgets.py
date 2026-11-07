@@ -82,7 +82,11 @@ async def test_concurrent_reservations_cannot_exceed_cap(engine):
     import asyncio
 
     await engine.repo.set_setting("paid_calls_enabled", True)
-    inv = await make_investigation(engine, limits={"max_cost_cents": 10})
+    # F16 : le profil par défaut "rapide" est plafonné à 5 centimes — l'override 10 y était
+    # clampé à 5 et le scénario (5 réservations concurrentes de 4) devenait incohérent.
+    # Profil "approfondi" (plafond 100) : l'override 10 s'applique tel quel, le scénario
+    # teste réellement la concurrence (2 réservations de 4 admises, 3 refusées).
+    inv = await make_investigation(engine, profile_id="approfondi", limits={"max_cost_cents": 10})
     ops = [await _mk_op(engine, inv["id"]) for _ in range(5)]
     results = await asyncio.gather(
         *[

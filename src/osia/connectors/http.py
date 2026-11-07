@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 from ..netguard import NetworkGuard, RequestContext
-from ..nethttp import DEFAULT_MAX_BYTES, make_connector, read_bounded
+from ..nethttp import DEFAULT_MAX_BYTES, DEFAULT_SESSION_POOL, read_bounded
 from .base import Connector, ConnectorManifest, FetchRequest, FetchResult, Provenance
 
 # Contrat d'un fetch brut : UNE requête sans suivre les redirections -> (status, headers, body).
@@ -33,11 +33,15 @@ async def aiohttp_fetch(url: str, ctx: Optional[RequestContext] = None) -> tuple
     timeout = aiohttp.ClientTimeout(total=15)
     pinned = ctx.pinned if ctx is not None else None
     max_bytes = ctx.max_bytes if ctx is not None else DEFAULT_MAX_BYTES
-    connector = make_connector(pinned)
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers={"User-Agent": "osia/0.1 (+investigation-osint)"}) as session:
-        async with session.get(url, allow_redirects=False) as resp:
-            body = await read_bounded(resp, max_bytes, resp.url.host or "")
-            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
+    # Réserve audit PR#18 : session réutilisée via le pool (clé = host épinglé) au lieu
+    # d'une ClientSession + TCPConnector par requête.
+    key = pinned.host if pinned is not None else "default"
+    session = await DEFAULT_SESSION_POOL.session(
+        key, pinned=pinned, timeout=timeout, headers={"User-Agent": "osia/0.1 (+investigation-osint)"}
+    )
+    async with session.get(url, allow_redirects=False) as resp:
+        body = await read_bounded(resp, max_bytes, resp.url.host or "")
+        return resp.status, {k.lower(): v for k, v in resp.headers.items()}, body
 
 
 aiohttp_fetch.accepts_ctx = True  # le guard lui transmet pinned/max_bytes/same_origin (F02)

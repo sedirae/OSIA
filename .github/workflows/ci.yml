@@ -24,6 +24,6 @@ jobs:
       - name: Installation (dépendances + extra test)
         run: python -m pip install -e ".[test]"
       - name: Tests pytest (T3.14 — multicouches, simulations, non-régression)
-        # test_concurrent_reservations_cannot_exceed_cap : défaillant pré-existant sur main
-        # (concurrence réservations), non traité ici — voir CONCEPTION/14 §6.
-        run: python -m pytest -q --deselect tests/test_budgets.py::test_concurrent_reservations_cannot_exceed_cap
+        # Suite complète, sans exclusion (audit F16 : le test budgétaire désélectionné était
+        # corrigé — profil "approfondi" — et réactivé ; aucune désélection inexpliquée).
+        run: python -m pytest -q

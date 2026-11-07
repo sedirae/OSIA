@@ -19,7 +19,7 @@ from .archive import (
     ArchiveError,
     extract_payload,
     is_valid_sha256,
-    read_meta_and_manifest,
+    read_and_verify,
     sha256_bytes,
     write_archive,
 )
@@ -175,9 +175,18 @@ class ExchangeService:
         return {"export_id": export_id, "format": format, "encrypted": encrypt, "partial": scope["partial"], "counts": counts, "warnings": warnings, "files": files_out, "dir": str(out_dir), "manifest": manifest}
 
     async def preview_import(self, src: pathlib.Path, passphrase: Optional[str] = None) -> dict[str, Any]:
-        meta, manifest, zf, crypto = read_meta_and_manifest(src, passphrase)
+        meta, manifest, zf, crypto, raw = read_and_verify(src, passphrase)
         try:
-            payload, _ = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=None if not manifest.get("encrypted") else crypto.key_from_params(passphrase, meta["kdf"]), crypto=crypto)
+            encrypted = bool(manifest.get("encrypted", False))
+            # Réserve audit PR#18 : meta["kdf"] -> meta.get("kdf") avec ArchiveError propre
+            # (jamais de KeyError brut sur un meta.json chiffré malformé).
+            key = None
+            if encrypted:
+                kdf = meta.get("kdf")
+                if not isinstance(kdf, dict):
+                    raise ArchiveError("meta.json invalide : parametres KDF absents")
+                key = crypto.key_from_params(passphrase, kdf)
+            payload, _ = extract_payload(zf, manifest, encrypted=encrypted, key=key, crypto=crypto, preloaded=raw)
         finally:
             zf.close()
         async with self.pool.acquire() as conn:
@@ -204,10 +213,16 @@ class ExchangeService:
             raise ArchiveError(f"mode inconnu: {mode}")
         if on_conflict not in ("fail", "skip"):
             raise ArchiveError(f"on_conflict inconnu: {on_conflict}")
-        meta, manifest, zf, crypto = read_meta_and_manifest(src, passphrase)
+        meta, manifest, zf, crypto, raw = read_and_verify(src, passphrase)
         try:
-            key = crypto.key_from_params(passphrase, meta["kdf"]) if manifest.get("encrypted") else None
-            payload, proofs = extract_payload(zf, manifest, encrypted=manifest.get("encrypted", False), key=key, crypto=crypto)
+            encrypted = bool(manifest.get("encrypted", False))
+            key = None
+            if encrypted:
+                kdf = meta.get("kdf")
+                if not isinstance(kdf, dict):
+                    raise ArchiveError("meta.json invalide : parametres KDF absents")
+                key = crypto.key_from_params(passphrase, kdf)
+            payload, proofs = extract_payload(zf, manifest, encrypted=encrypted, key=key, crypto=crypto, preloaded=raw)
         finally:
             zf.close()
         staged = self._stage_proof_files(proofs)

@@ -9,23 +9,30 @@ description = "OSIA — moteur d'investigation OSINT contrôlable sur sources pu
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
+# Audit F16 : bornes supérieures explicites — installation reproductible (pas de dérive
+# silencieuse vers une version non testée). Borne = prochaine version majeure (mineure
+# pour les paquets 0.x à rythme rapide).
 dependencies = [
-  "asyncpg>=0.29",
-  "pydantic>=2.5",
-  "aiohttp>=3.9",
-  "fastapi>=0.110",
-  "uvicorn>=0.29",
-  "cryptography>=43",
-  "argon2-cffi>=23",
-  "pypdf>=4.0",
+  "asyncpg>=0.29,<0.33",
+  "pydantic>=2.5,<3",
+  "aiohttp>=3.9,<4",
+  "fastapi>=0.110,<1",
+  "uvicorn>=0.29,<1",
+  "cryptography>=43,<51",
+  "argon2-cffi>=23,<26",
+  "pypdf>=4.0,<8",
 ]
 
 [project.optional-dependencies]
+# Extra historique conservé pour compatibilité : le frontend web (assets/routes) est
+# inclus dans le paquet de base — aucune dépendance supplémentaire requise (audit F16,
+# CONCEPTION/01 §1 corrigé en conséquence).
+web = []
 test = [
-  "pytest>=8",
-  "pytest-asyncio>=0.23",
-  "httpx>=0.27",
-  "pgserver>=0.1",
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.23,<2",
+  "httpx>=0.27,<1",
+  "pgserver>=0.1,<0.2",
 ]
 
 [project.scripts]
