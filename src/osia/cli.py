@@ -435,7 +435,11 @@ async def _cmd_ai_test(args) -> int:
 
 
 async def _cmd_ai_fallback(args) -> int:
-    """CON-11 / T8.8/T8.9 + V1.3 : autorise ou révoque le repli local -> cloud (persisté, audité)."""
+    """CON-11 / T8.8/T8.9 + V1.3 : autorise ou révoque le repli local -> cloud (persisté, audité).
+    Le flag --enable/--disable est EXPLICITE : aucune autorisation implicite (T8.9)."""
+    if args.enable is None:
+        print("préciser --enable ou --disable (aucune autorisation implicite du repli, T8.9)", file=sys.stderr)
+        return 2
     from .engine import Engine
 
     engine = Engine(_settings())
@@ -565,8 +569,8 @@ def main(argv: list[str] | None = None) -> int:
     aitest.add_argument("key")
     aitest.set_defaults(func=_cmd_ai_test)
     aifb = ai_sub.add_parser("fallback", help="autoriser/révoquer le repli local -> cloud (T8.9, V1.3)")
-    aifb.add_argument("--enable", action="store_true", default=True)
-    aifb.add_argument("--disable", dest="enable", action="store_false")
+    aifb.add_argument("--enable", dest="enable", action="store_true", default=None)
+    aifb.add_argument("--disable", dest="enable", action="store_false", default=None)
     aifb.set_defaults(func=_cmd_ai_fallback)
 
     args = parser.parse_args(argv)
