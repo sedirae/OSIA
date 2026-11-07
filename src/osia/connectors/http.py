@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -11,6 +12,16 @@ from .base import Connector, ConnectorManifest, FetchRequest, FetchResult, Prove
 # Contrat d'un fetch brut : UNE requête sans suivre les redirections -> (status, headers, body).
 # Le NetworkGuard gère les redirections, le rate limit et l'anti-SSRF (T5.4).
 FetchFn = Callable[[str], Awaitable[tuple[int, dict, bytes]]]
+
+
+def build_url(url: str, params: Optional[dict[str, Any]] = None) -> str:
+    """URL de requête avec paramètres encodés (urlencode). Utilisée pour l'appel ET la
+    provenance : l'URL stockée avec la preuve reste bien formée même si la requête
+    contient des caractères réservés (T5.6)."""
+    if params:
+        sep = "&" if "?" in url else "?"
+        url = url + sep + urlencode(params)
+    return url
 
 
 async def aiohttp_fetch(url: str) -> tuple[int, dict, bytes]:
@@ -42,14 +53,10 @@ class HttpConnector(Connector):
         self.probe_query = probe_query
 
     async def _get(self, url: str, params: Optional[dict[str, Any]] = None) -> tuple[int, dict, bytes]:
-        if params:
-            from urllib.parse import urlencode
-
-            sep = "&" if "?" in url else "?"
-            url = url + sep + urlencode(params)
+        full_url = build_url(url, params)
         if self.netguard is not None:
-            return await self.netguard.guarded_request(self.fetch_fn, url)
-        return await self.fetch_fn(url)
+            return await self.netguard.guarded_request(self.fetch_fn, full_url)
+        return await self.fetch_fn(full_url)
 
     def _result(self, *, query: str, url: str, status: int, payload: Any, media_type: str = "application/json", extracted_text: Optional[str] = None) -> FetchResult:
         content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
@@ -62,8 +69,3 @@ class HttpConnector(Connector):
 
     async def fetch(self, request: FetchRequest) -> FetchResult:
         raise NotImplementedError
-
-    def validate_response(self, payload: Any) -> list[str]:
-        """Contrôle sémantique (B7 §9.1) : retourne la liste des problèmes de structure.
-        Une réponse HTTP 200 ne suffit pas à prouver la validité fonctionnelle."""
-        return []
