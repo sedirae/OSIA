@@ -682,7 +682,7 @@ def create_app(engine: Engine) -> FastAPI:
         try:
             result = await adapter.ping()
         except Exception as exc:
-            _audit_op("op.ai.test", request, {"provider_key": body.provider_key, "ok": False})
+            engine.audit.log("op.ai.test", "failure", detail={"provider_key": body.provider_key}, client=_client(request))
             raise ApiError("ai_test_failed", f"test de connexion échoué : {exc}", 502) from exc
         _audit_op("op.ai.test", request, {"provider_key": body.provider_key, "ok": True})
         return result
