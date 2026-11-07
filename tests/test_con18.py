@@ -66,6 +66,16 @@ def test_techlog_error_masque_et_fichier_0600(tmp_path):
     assert mode == 0o600
 
 
+def test_techlog_log_ne_leve_jamais(tmp_path):
+    """T3.13 : un échec de journalisation (répertoire indisponible) ne fait jamais
+    échouer l'opération métier qui déclenche l'écriture."""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x", encoding="utf-8")
+    log = TechLog(blocker, retention_days=30)
+    log.log("tasks", "source.query", investigation_id="inv", detail={"token": "s"})  # ne lève pas
+    assert log.read() == []
+
+
 def test_techlog_purge_et_dry_run(tmp_path):
     """expired_count ne supprime rien (dry-run) ; purge supprime les entrées hors rétention."""
     log = TechLog(tmp_path / "logs", retention_days=30)
@@ -77,8 +87,8 @@ def test_techlog_purge_et_dry_run(tmp_path):
     assert log.expired_count() == 2
     remaining_before = len(log.read(limit=100))
     assert remaining_before == 3
-    removed_files = log.purge()
-    assert removed_files == 1  # le fichier du jour a été réécrit
+    removed = log.purge()
+    assert removed == 2  # deux entrées hors rétention supprimées (le fichier du jour est réécrit)
     entries = log.read()
     assert len(entries) == 1 and entries[0]["event"] == "engine.setup"
     assert log.expired_count() == 0

@@ -49,6 +49,37 @@ class TechLog:
         error: Optional[str] = None,
         detail: Optional[dict[str, Any]] = None,
     ) -> None:
+        """T3.13 : ne JAMAIS lever — un échec de journalisation ne doit pas faire échouer
+        l'opération métier (source.query, ai.call, ...) qui la déclenche."""
+        try:
+            self._write(
+                component, event,
+                level=level,
+                investigation_id=investigation_id,
+                branch_id=branch_id,
+                task_id=task_id,
+                op_id=op_id,
+                duration_ms=duration_ms,
+                error=error,
+                detail=detail,
+            )
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _write(
+        self,
+        component: str,
+        event: str,
+        *,
+        level: str,
+        investigation_id: Optional[str],
+        branch_id: Optional[str],
+        task_id: Optional[str],
+        op_id: Optional[str],
+        duration_ms: Optional[int],
+        error: Optional[str],
+        detail: Optional[dict[str, Any]],
+    ) -> None:
         self._ensure()
         entry: dict[str, Any] = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -95,11 +126,12 @@ class TechLog:
         return count
 
     def purge(self) -> int:
-        """Purge des entrées hors rétention. Retourne le nombre de fichiers supprimés/réécrits."""
+        """Purge des entrées hors rétention. Retourne le nombre d'ENTRÉES supprimées
+        (cohérent avec SecurityAudit.purge, exposé comme ``removed_entries`` par l'API/CLI)."""
         if self.retention_days <= 0 or not self.log_dir.exists():
             return 0
         cutoff = self._cutoff()
-        touched = 0
+        removed = 0
         for path in sorted(self.log_dir.glob("tech-*.jsonl")):
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
@@ -114,8 +146,9 @@ class TechLog:
                     continue  # ligne illisible : écartée (jamais de secret supposé présent)
                 if t >= cutoff:
                     kept.append(line)
-            if len(kept) != len(lines):
-                touched += 1
+            expired = len(lines) - len(kept)
+            removed += expired
+            if expired:
                 if kept:
                     tmp = path.with_suffix(".jsonl.tmp")
                     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -126,7 +159,7 @@ class TechLog:
                     os.replace(tmp, path)
                 else:
                     path.unlink()
-        return touched
+        return removed
 
     def read(self, limit: int = 100) -> list[dict]:
         if not self.log_dir.exists():
