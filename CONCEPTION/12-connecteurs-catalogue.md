@@ -13,7 +13,8 @@
 
 - `HttpConnector` : **toute requête sortante passe par `netguard.guarded_request`** (allowlist/denylist, anti-SSRF, redirections re-vérifiées, taille, rate limit — CON-06). Sans guard injecté (tests), appel direct.
 - `fetch_fn` injectable : contrat `(url) -> (status, headers, body)` **sans suivre les redirections** (le guard les gère). Défaut `aiohttp_fetch` (aiohttp, UA `osia/0.1`, timeout 15 s, `allow_redirects=False`). En test, `fetch_fn` est remplacé par des fixtures JSON : **aucun appel réseau** (AGENTS.md).
-- `_result()` construit le `FetchResult` avec provenance ; `validate_response()` hook sémantique.
+- `build_url(url, params)` : URL de requête avec paramètres encodés (urlencode), utilisée pour l'appel **et** la provenance — l'URL stockée avec la preuve reste bien formée même pour une requête contenant des caractères réservés (T5.6).
+- `_result()` construit le `FetchResult` avec provenance ; `validate_response()` hook sémantique (hérité du contrat commun, surchargé par chaque connecteur réel).
 
 ## 3. Catalogue V1.2 — `connectors/real.py` (PERIMETRE-V1 §V1.2, B7 §9.4)
 
@@ -37,7 +38,7 @@ Fiches complètes (B7 §9.4) dans les manifestes : `scope`, `categories`, `acces
 - `ConnectorHealthChecker` : états `operationnel | degrade | suspendu | obsolete | inconnu` (B7 §9.1).
   - **obsolète** : `last_checked` absent/illisible ou > 180 jours (conditions non revérifiées, B7 §9.4) ;
   - **suspendu** : connecteur inconnu/désactivé (retiré des recherches sans bloquer les autres, B-ACC-01/12), sonde refusée par le NetworkGuard, sonde indisponible (timeout/DNS), ou HTTP 401/403 (restriction bloquante) ;
-  - **dégradé** : réponse reçue mais validation sémantique incomplète (HTTP ≥ 400 ou problèmes de structure) — certaines fonctions restent utilisables, les autres exclues ;
+  - **dégradé** : réponse reçue mais validation sémantique incomplète (HTTP ≥ 400, corps illisible/non JSON attendu, ou problèmes de structure) — certaines fonctions restent utilisables, les autres exclues ;
   - **opérationnel** : sonde 2xx + `validate_response` sans problème ;
   - **inconnu** : aucune sonde par défaut (ex. `web.url`) et aucun contrôle manuel effectué.
 - **Sonde légère** (B7 §9.5) : `probe_query` par connecteur (ex. `EDF`, `ELECTRICITE DE FRANCE`), remplaçable manuellement. **V1 : contrôles manuels uniquement** (API), aucun sondage planifié — la fréquence des vérifications périodiques relève du calendrier de maintenance avancée (B7 §9.5, B-ACC-14).
@@ -57,5 +58,5 @@ Fiches complètes (B7 §9.4) dans les manifestes : `scope`, `categories`, `acces
 
 ## 7. Vérifications réellement exécutées
 
-- `pytest -q` : **117 tests passés** (pgserver embarqué), dont **18 dans `tests/test_con0708.py`** : normalisation des 3 API (fixtures JSON injectées, aucun réseau), filtre LEI/nom GLEIF, `validate_response` sur structure invalide, refus NetworkGuard sur domaine non autorisé, passage obligé par le guard, extraction HTML (script/style filtrés) et PDF textuel (PDF minimal fabriqué à la main), états de santé (opérationnel/dégradé/suspendu/obsolète/inconnu, check_all), enregistrement moteur (ids, allowlist, guard injecté), routes API health (GET état inconnu puis opérationnel, POST health-check unitaire et global, 404 connecteur inconnu).
+- `pytest -q` : **120 tests passés** (pgserver embarqué), dont **21 dans `tests/test_con0708.py`** : normalisation des 3 API (fixtures JSON injectées, aucun réseau), filtre LEI/nom GLEIF, `validate_response` sur structure invalide, URL de provenance encodée et fidèle à la requête (caractères réservés), normalisation tolérante aux champs null, refus NetworkGuard sur domaine non autorisé, passage obligé par le guard, extraction HTML (script/style filtrés) et PDF textuel (PDF minimal fabriqué à la main), états de santé (opérationnel/dégradé y compris corps non JSON/suspendu/obsolète/inconnu, check_all), enregistrement moteur (ids, allowlist, guard injecté), routes API health (GET état inconnu puis opérationnel, POST health-check unitaire et global, 404 connecteur inconnu).
 - Aucun appel externe réel exécuté pendant les tests (AGENTS.md : connecteurs simulés/fixtures en CI).

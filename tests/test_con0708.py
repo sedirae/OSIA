@@ -152,6 +152,36 @@ async def test_validate_response_detecte_structure_invalide():
     assert g.validate_response({"data": [{"id": "x"}]}) != []  # forme brute non normalisée
 
 
+async def test_provenance_url_encodee_et_fidele():
+    """T5.6 : l'URL de provenance stockée avec la preuve est bien formée (urlencode)
+    même pour une requête avec caractères réservés, et reflète la requête réelle."""
+    c = RechercheEntreprisesConnector(fetch_fn=fake_fetch(RECHERCHE_FIXTURE))
+    res = await c.fetch(FetchRequest(query="A & B"))
+    assert "q=A+%26+B" in res.provenance.url
+
+    g = GleifConnector(fetch_fn=fake_fetch(GLEIF_FIXTURE))
+    res_g = await g.fetch(FetchRequest(query="969500T9EZF3XENR1R42"))
+    assert "filter%5Blei%5D=969500T9EZF3XENR1R42" in res_g.provenance.url
+
+
+async def test_normalisation_tolere_champs_null():
+    """B7 §9.1 : une réponse mal formée (champs null) produit une structure contrôlable,
+    pas un crash — validate_response reste applicable."""
+    g = GleifConnector(fetch_fn=fake_fetch({"data": [{"id": "x", "attributes": {"entity": {"legalName": None, "legalAddress": None}}}]}))
+    res = await g.fetch(FetchRequest(query="EDF"))
+    payload = json.loads(res.content)
+    assert payload["results"] == [{"lei": "x", "legal_name": None, "country": None}]
+    assert g.validate_response(payload) == []
+
+    b = BodaccConnector(fetch_fn=fake_fetch({"results": None, "meta": None}))
+    res_b = await b.fetch(FetchRequest(query="EDF"))
+    assert json.loads(res_b.content) == {"query": "EDF", "total": 0, "results": []}
+
+    r = RechercheEntreprisesConnector(fetch_fn=fake_fetch({"results": None, "total_results": None}))
+    payload_r = json.loads((await r.fetch(FetchRequest(query="EDF"))).content)
+    assert payload_r["results"] == [] and payload_r["total_results"] == 0
+
+
 # ---------- NetworkGuard (T5.4) ----------
 
 
@@ -228,6 +258,16 @@ async def test_health_degrade_si_validation_echoue():
     report = await checker.check("gouv.recherche-entreprises")
     assert report.state == HealthState.DEGRADE
     assert report.validation_problems
+
+
+async def test_health_degrade_si_reponse_200_non_json():
+    """B7 §9.1 : une réponse 200 dont le corps n'est pas le JSON attendu est un problème
+    de structure -> dégradé (pas une indisponibilité réseau -> suspendu)."""
+    c = RechercheEntreprisesConnector(fetch_fn=fake_fetch(b"<html>page d'erreur</html>", headers={"content-type": "text/html"}))
+    checker = ConnectorHealthChecker(registry_with(c=c))
+    report = await checker.check("gouv.recherche-entreprises")
+    assert report.state == HealthState.DEGRADE
+    assert "structure inattendue" in report.detail
 
 
 async def test_health_suspendu_si_indisponible_ou_desactive():
