@@ -92,8 +92,9 @@ class PolicyEngine:
                 if kind == OpKind.SOURCE_REQUEST:
                     done = await conn.fetchval(
                         "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'source_request' "
-                        "AND state IN ('authorized','reserved','in_flight','completed','uncertain','reconciled')",
+                        "AND state = ANY($2::text[])",
                         investigation_id,
+                        list(_COUNTED_OP_STATES),
                     )
                     if int(done) >= limits.max_source_requests:
                         return Decision(allowed=False, reason="plafond_requetes_source_atteint")
@@ -101,8 +102,9 @@ class PolicyEngine:
                 else:
                     done = await conn.fetchval(
                         "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND kind = 'ai_call' "
-                        "AND state IN ('authorized','reserved','in_flight','completed','uncertain','reconciled')",
+                        "AND state = ANY($2::text[])",
                         investigation_id,
+                        list(_COUNTED_OP_STATES),
                     )
                     if int(done) >= limits.max_ai_calls:
                         return Decision(allowed=False, reason="plafond_appels_ia_atteint")
@@ -160,18 +162,23 @@ class PolicyEngine:
             reason,
         )
 
-    async def mark_in_flight(self, op_id: str) -> None:
-        await self.pool.execute(
-            "UPDATE external_ops SET state = 'in_flight', updated_at = now() WHERE id = $1 AND state IN ('authorized','reserved')",
+    async def mark_in_flight(self, op_id: str) -> bool:
+        """Transition atomique authorized/reserved -> in_flight. Retourne False si l'opération
+        n'est plus envoyable (ex. annulée par un stop entre la revalidation et l'envoi) : dans ce
+        cas l'appelant ne doit PAS exécuter l'opération (jamais envoyée -> enveloppe libérée)."""
+        row = await self.pool.fetchrow(
+            "UPDATE external_ops SET state = 'in_flight', updated_at = now() "
+            "WHERE id = $1 AND state IN ('authorized','reserved') RETURNING id",
             op_id,
         )
+        return row is not None
 
     async def complete_op(self, op_id: str, result: dict, actual_cents: Optional[int] = None) -> None:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
-                if row is None:
-                    return
+                if row is None or row["state"] not in ("in_flight", "reserved"):
+                    return  # garde d'état : une op annulée/échouée n'est jamais re-transitionnée
                 await conn.execute(
                     "UPDATE external_ops SET state = 'completed', result = $2::jsonb, updated_at = now() WHERE id = $1",
                     op_id,
@@ -271,8 +278,8 @@ class PolicyEngine:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
-                if row is None:
-                    return
+                if row is None or row["state"] not in ("in_flight", "reserved"):
+                    return  # garde d'état : une op annulée n'est pas re-transitionnée
                 await conn.execute(
                     "UPDATE external_ops SET state = 'failed', error = $2, updated_at = now() WHERE id = $1",
                     op_id,
@@ -288,8 +295,8 @@ class PolicyEngine:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
-                if row is None:
-                    return
+                if row is None or row["state"] not in ("in_flight", "reserved"):
+                    return  # garde d'état : une op annulée/échouée n'est jamais re-transitionnée
                 await conn.execute(
                     "UPDATE external_ops SET state = 'uncertain', result = $2::jsonb, updated_at = now() WHERE id = $1",
                     op_id,

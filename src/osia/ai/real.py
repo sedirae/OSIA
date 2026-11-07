@@ -167,15 +167,14 @@ class ChatCompletionsAdapter(AIAdapter):
         return self.cost_per_call_cents
 
     def actual_cost_cents(self, usage: Optional[dict[str, Any]]) -> Optional[int]:
-        """Coût constaté depuis l'usage réel (T8.5, F03) ; None si l'usage est absent (à réconcilier,
-        jamais remplacé silencieusement par l'estimation)."""
-        if usage and self.input_cents_per_mtok is not None and self.output_cents_per_mtok is not None:
-            prompt_tokens = int(usage.get("prompt_tokens") or 0)
-            completion_tokens = int(usage.get("completion_tokens") or 0)
-            return -(-(prompt_tokens * self.input_cents_per_mtok + completion_tokens * self.output_cents_per_mtok) // 1_000_000)
-        if usage is None:
+        """Coût constaté depuis l'usage réel (T8.5, F03) ; None si l'usage ou les tarifs sont
+        absents (à réconcilier — le forfait cost_per_call_cents n'est JAMAIS présenté comme
+        montant constaté)."""
+        if usage is None or self.input_cents_per_mtok is None or self.output_cents_per_mtok is None:
             return None
-        return self.cost_per_call_cents if self.paid else None
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        return -(-(prompt_tokens * self.input_cents_per_mtok + completion_tokens * self.output_cents_per_mtok) // 1_000_000)
 
     async def complete(self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]) -> T:
         output, _usage = await self.complete_with_usage(role, prompt, input_data, response_model)

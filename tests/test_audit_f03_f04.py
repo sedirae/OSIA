@@ -256,6 +256,84 @@ async def test_f04_revalidation_annule_envoi_apres_attente_semaphore():
     policy.mark_uncertain.assert_not_awaited()  # jamais envoyée -> pas 'uncertain'
 
 
+async def test_f04_mark_in_flight_atomique_refuse_envoi_si_annulee_entre_revalidation_et_envoi():
+    """P2-1 (audit PR #19) : si l'opération est annulée entre la revalidation et mark_in_flight
+    (stop concurrent), mark_in_flight retourne False -> aucun appel adaptateur, enveloppe libérée."""
+    cancelled = []
+
+    async def cancel_op(op_id, *, reason):
+        cancelled.append((op_id, reason))
+
+    policy = NS(
+        allow_target=lambda t: None,
+        authorize=AsyncMock(return_value=NS(allowed=True, op_id="op1", reservation_id="r1", timeout_seconds=60)),
+        revalidate=AsyncMock(return_value=NS(allowed=True, reason=None, op_id="op1", reservation_id="r1", timeout_seconds=60)),
+        mark_in_flight=AsyncMock(return_value=False),  # annulée entre les deux (stop)
+        cancel_op=AsyncMock(side_effect=cancel_op),
+        complete_op=AsyncMock(), mark_uncertain=AsyncMock(), fail_op=AsyncMock(),
+    )
+    adapter = NS(
+        provider="t", model="m", paid=False, cost_per_call_cents=None, max_output_tokens=None,
+        estimate_input_tokens=lambda p, d: 1, estimate_cost_cents=lambda i, m: None,
+        actual_cost_cents=lambda u: None,
+        complete=AsyncMock(return_value=PlanProposal()),
+        complete_with_usage=AsyncMock(return_value=(PlanProposal(), None)),
+    )
+    broker = AIBroker(policy, NS(emit=AsyncMock()), {"t": adapter}, {"planning": "t"}, semaphore=asyncio.Semaphore(1))
+    with pytest.raises(PolicyDeny) as exc:
+        await broker.call("planning", "p", {}, PlanProposal, investigation_id="i")
+    assert exc.value.reason == "operation_annulee_avant_envoi"
+    assert adapter.complete_with_usage.await_count == 0
+    assert cancelled == [("op1", "operation_annulee_avant_envoi")]
+
+
+async def test_f04_revalidation_gate_aussi_cote_source_query():
+    """P3-7 (audit PR #19) : le handler source_query applique la même revalidation avant le fetch."""
+    from osia.connectors.base import TrustLevel
+    from osia.tasks import TaskContext, handle_source_query
+
+    connector = NS(
+        manifest=NS(id="web.url", trust_level=TrustLevel.OFFICIAL, paid=False, cost_per_call_cents=None),
+        fetch=AsyncMock(return_value=NS(content="x", provenance=NS(url="https://x.test", http_status=200, source_id="web.url"), media_type="text/html", extracted_text="x")),
+    )
+    engine = NS(
+        repo=NS(
+            get_investigation=AsyncMock(return_value={"id": "inv1", "state": "running", "objective": "o", "hints": []}),
+            get_setting=AsyncMock(return_value=24),
+            cache_get=AsyncMock(return_value=None),
+        ),
+        registry=NS(get=lambda cid: connector),
+        policy=NS(
+            authorize=AsyncMock(return_value=NS(allowed=True, op_id="op9", reservation_id=None, timeout_seconds=15)),
+            revalidate=AsyncMock(return_value=NS(allowed=False, reason="investigation_non_active:stopped")),
+            cancel_op=AsyncMock(),
+            mark_in_flight=AsyncMock(),
+            mark_uncertain=AsyncMock(),
+        ),
+        external_semaphore=asyncio.Semaphore(1),
+        bus=NS(emit=AsyncMock()),
+        techlog=NS(log=lambda *a, **k: None),
+    )
+    task = {"id": "t1", "investigation_id": "inv1", "branch_id": "b1", "depth": 0, "payload": {"query": "q", "connector_id": "web.url"}}
+    with pytest.raises(PolicyDeny) as exc:
+        await handle_source_query(task, TaskContext(engine=engine))
+    assert exc.value.reason == "investigation_non_active:stopped"
+    assert connector.fetch.await_count == 0  # aucun fetch après revalidation refusée
+    engine.policy.cancel_op.assert_awaited_once()
+
+
+def test_f03_cout_constate_sans_tarifs_est_inconnu_pas_forfait():
+    """P3-2 (audit PR #19) : usage présent mais tarifs inconnus -> coût constaté None
+    (réconciliation), jamais le forfait présenté comme réel."""
+    adapter = ChatCompletionsAdapter(
+        provider="t", model="m", base_url="https://m.test", paid=True, cost_per_call_cents=99,
+        input_cents_per_mtok=None, output_cents_per_mtok=None, max_output_tokens=100,
+        fetch_fn=None,
+    )
+    assert adapter.actual_cost_cents({"prompt_tokens": 10, "completion_tokens": 5}) is None
+    assert adapter.actual_cost_cents(None) is None
+
+
 async def test_f04_stop_annule_les_runners_en_cours():
     sch = Scheduler(None, None, None, {}, engine=None)
     runner = asyncio.create_task(asyncio.sleep(30))
