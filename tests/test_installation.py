@@ -178,3 +178,27 @@ async def test_base_existante_en_mode_serveur_requiert_une_authentification(inst
     finally:
         app.terminate()
         app.wait(timeout=15)
+
+
+def test_echec_pip_permet_de_relancer_sans_effacer_de_donnees(install_home, monkeypatch):
+    prepare_virtualenv_without_downloads(monkeypatch)
+    run = subprocess.run
+    config_dir = install_home / "config/osia"
+    config_dir.mkdir(parents=True)
+    existing = config_dir / "note.txt"
+    existing.write_text("à conserver")
+
+    def fail_download(command, *args, **kwargs):
+        if command[1:4] == ["-m", "pip", "install"]:
+            raise subprocess.CalledProcessError(1, command)
+        return run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_download)
+    monkeypatch.setenv("OSIA_INSTALL_DB_DSN", "postgresql://osia@localhost/osia")
+    args = installer.argparse.Namespace(mode="desktop", database="existing", web_ui=True)
+    for _ in range(2):
+        with pytest.raises(subprocess.CalledProcessError):
+            installer.install(args)
+        assert not (install_home / "data/osia/venv").exists()
+        assert existing.read_text() == "à conserver"
+        assert not (config_dir / "database.secret").exists()

@@ -115,7 +115,7 @@ def test_audit_purge_et_dry_run(tmp_path):
 
 async def test_api_logs_overview_trois_finalites(engine):
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/logs")
         assert r.status_code == 200
         body = r.json()
@@ -132,7 +132,7 @@ async def test_api_logs_purge_dry_run_puis_reel_et_audite(engine):
     # juste avant chaque appel pour que la prévisualisation la voie.
     _write_line(engine.techlog.path, {"ts": OLD_TS, "level": "info", "component": "old", "event": "old"})
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         # dry-run tech : prévisualisation sans suppression
         r = await client.post("/api/v1/logs/purge", json={"kind": "tech", "dry_run": True})
         assert r.status_code == 200
@@ -165,7 +165,7 @@ async def test_api_cache_purge_dry_run_puis_reel(engine):
         json.dumps({"content": "y"}),
     )
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.post("/api/v1/cache/purge", json={"dry_run": True})
         assert r.status_code == 200
         body = r.json()
@@ -210,7 +210,7 @@ async def test_historique_metier_conserve_apres_purges(engine):
 async def test_tech_log_retention_days_parametre_visible_et_modifiable(engine):
     """D7 §9.1 : tech_log_retention_days est un paramètre global éditable, borné (>= 1)."""
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/settings")
         assert r.json()["settings"]["tech_log_retention_days"] == 30
         r = await client.put("/api/v1/settings", json={"settings": {"tech_log_retention_days": 7}})

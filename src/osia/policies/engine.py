@@ -143,11 +143,15 @@ class PolicyEngine:
                 await self._fail_op(op["id"], deny.reason)
                 return Decision(allowed=False, reason=deny.reason, op_id=op["id"])
             reservation_id = reservation["id"]
-            await self.pool.execute(
-                "UPDATE external_ops SET state = 'reserved', reservation_id = $2, updated_at = now() WHERE id = $1",
+            attached = await self.pool.fetchval(
+                "UPDATE external_ops SET state = 'reserved', reservation_id = $2, updated_at = now() "
+                "WHERE id = $1 AND state = 'authorized' RETURNING id",
                 op["id"],
                 reservation_id,
             )
+            if attached is None:
+                await self.budgets.release(reservation_id, note="opération annulée pendant la réservation")
+                return Decision(allowed=False, reason="operation_annulee_avant_envoi", op_id=op["id"])
         return Decision(
             allowed=True,
             op_id=op["id"],
@@ -185,7 +189,7 @@ class PolicyEngine:
                     json.dumps(result, ensure_ascii=False, default=str),
                 )
                 if row["reservation_id"] and actual_cents is not None:
-                    await self.budgets.consume(row["reservation_id"], actual_cents)
+                    await self.budgets.consume_in_conn(conn, row["reservation_id"], actual_cents)
 
     async def fail_op(self, op_id: str, error: str) -> None:
         await self._fail_op(op_id, error)
@@ -207,10 +211,10 @@ class PolicyEngine:
                     if amount is None:
                         raise PolicyDeny("cout_inconnu_bloque", "reconciliation")
                     if row["reservation_id"]:
-                        await self.budgets.consume(row["reservation_id"], amount)
+                        await self.budgets.consume_in_conn(conn, row["reservation_id"], amount)
                 elif row["reservation_id"]:
-                    await self.budgets.release(
-                        row["reservation_id"], note="réconciliation : appel non facturé"
+                    await self.budgets.release_in_conn(
+                        conn, row["reservation_id"], note="réconciliation : appel non facturé"
                     )
                 return await conn.fetchrow(
                     "UPDATE external_ops SET state = 'reconciled', updated_at = now() WHERE id = $1 RETURNING *",
@@ -231,14 +235,15 @@ class PolicyEngine:
         l'appelant ne doit PAS exécuter l'opération (attente de sémaphore incluse)."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # Même ordre que stop/suspend : investigation puis opération.
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
                 op = await conn.fetchrow("SELECT * FROM external_ops WHERE id = $1 FOR UPDATE", op_id)
                 if op is None:
                     return Decision(allowed=False, reason="operation_inconnue")
                 if op["state"] not in ("authorized", "reserved"):
                     return Decision(allowed=False, reason=f"operation_non_envoyable:{op['state']}")
-                inv = await conn.fetchrow(
-                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
-                )
                 if inv is None:
                     return Decision(allowed=False, reason="investigation_inconnue")
                 if inv["state"] != "running":
@@ -267,9 +272,8 @@ class PolicyEngine:
                     op_id,
                     reason,
                 )
-                reservation_id = row["reservation_id"]
-        if reservation_id:
-            await self.budgets.release(reservation_id, note=f"annulation avant envoi ({reason})")
+                if row["reservation_id"]:
+                    await self.budgets.release_in_conn(conn, row["reservation_id"], note=f"annulation avant envoi ({reason})")
 
     async def fail_op_billed(self, op_id: str, error: str, *, actual_cents: int) -> None:
         """Opération échouée MAIS envoyée et facturée (ex. sortie IA invalide après l'appel, F03) :
@@ -285,9 +289,8 @@ class PolicyEngine:
                     op_id,
                     error,
                 )
-                reservation_id = row["reservation_id"]
-        if reservation_id:
-            await self.budgets.consume(reservation_id, actual_cents)
+                if row["reservation_id"]:
+                    await self.budgets.consume_in_conn(conn, row["reservation_id"], actual_cents)
 
     async def complete_op_uncertain(self, op_id: str, result: dict) -> None:
         """Appel terminé mais facturation INCONNUE (pas d'usage, F03) : résultat persisté, état

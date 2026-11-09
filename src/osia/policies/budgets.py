@@ -185,55 +185,63 @@ class BudgetManager:
     async def consume(self, reservation_id: str, actual_cents: int) -> asyncpg.Record:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    "UPDATE reservations SET state = 'consumed', updated_at = now() "
-                    "WHERE id = $1 AND state = 'reserved' RETURNING *",
-                    reservation_id,
-                )
-                if row is None:
-                    raise PolicyDeny("reservation_non_reservee", "ledger")
-                period = _period(row["created_at"])
-                await conn.execute(
-                    "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
-                    "VALUES ($1, $2, 'consumed', $3, $4, $5)",
-                    row["investigation_id"],
-                    reservation_id,
-                    actual_cents,
-                    period,
-                    "consommation réelle constatée",
-                )
-                if actual_cents != row["amount_cents"]:
-                    await conn.execute(
-                        "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
-                        "VALUES ($1, $2, 'reconciled', $3, $4, $5)",
-                        row["investigation_id"],
-                        reservation_id,
-                        actual_cents - row["amount_cents"],
-                        period,
-                        "écart réservation/facturation visible (T8.4)",
-                    )
-                return row
+                return await self.consume_in_conn(conn, reservation_id, actual_cents)
+
+    async def consume_in_conn(self, conn: asyncpg.Connection, reservation_id: str, actual_cents: int) -> asyncpg.Record:
+        if type(actual_cents) is not int or not 0 <= actual_cents <= 2_147_483_647:
+            raise PolicyDeny("cout_reel_invalide", "ledger")
+        row = await conn.fetchrow(
+            "UPDATE reservations SET state = 'consumed', updated_at = now() "
+            "WHERE id = $1 AND state = 'reserved' RETURNING *",
+            reservation_id,
+        )
+        if row is None:
+            raise PolicyDeny("reservation_non_reservee", "ledger")
+        period = _period(row["created_at"])
+        await conn.execute(
+            "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
+            "VALUES ($1, $2, 'consumed', $3, $4, $5)",
+            row["investigation_id"],
+            reservation_id,
+            actual_cents,
+            period,
+            "consommation réelle constatée",
+        )
+        if actual_cents != row["amount_cents"]:
+            await conn.execute(
+                "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
+                "VALUES ($1, $2, 'reconciled', $3, $4, $5)",
+                row["investigation_id"],
+                reservation_id,
+                actual_cents - row["amount_cents"],
+                period,
+                "écart réservation/facturation visible (T8.4)",
+            )
+        return row
 
     async def release(self, reservation_id: str, *, note: str = "enveloppe libérée") -> asyncpg.Record:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                row = await conn.fetchrow(
-                    "UPDATE reservations SET state = 'released', updated_at = now() "
-                    "WHERE id = $1 AND state = 'reserved' RETURNING *",
-                    reservation_id,
-                )
-                if row is None:
-                    raise PolicyDeny("reservation_non_reservee", "ledger")
-                await conn.execute(
-                    "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
-                    "VALUES ($1, $2, 'released', $3, $4, $5)",
-                    row["investigation_id"],
-                    reservation_id,
-                    -row["amount_cents"],
-                    _period(row["created_at"]),
-                    note,
-                )
-                return row
+                return await self.release_in_conn(conn, reservation_id, note=note)
+
+    async def release_in_conn(self, conn: asyncpg.Connection, reservation_id: str, *, note: str = "enveloppe libérée") -> asyncpg.Record:
+        row = await conn.fetchrow(
+            "UPDATE reservations SET state = 'released', updated_at = now() "
+            "WHERE id = $1 AND state = 'reserved' RETURNING *",
+            reservation_id,
+        )
+        if row is None:
+            raise PolicyDeny("reservation_non_reservee", "ledger")
+        await conn.execute(
+            "INSERT INTO ledger (investigation_id, reservation_id, kind, amount_cents, period, note) "
+            "VALUES ($1, $2, 'released', $3, $4, $5)",
+            row["investigation_id"],
+            reservation_id,
+            -row["amount_cents"],
+            _period(row["created_at"]),
+            note,
+        )
+        return row
 
     async def budget_view(self, investigation_id: str, branch_id: Optional[str] = None) -> BudgetView:
         """Vue budgétaire. `branch_id` optionnel (réserve audit PR#19 P3-5) : ajoute alors

@@ -80,6 +80,15 @@ export OSIA_LISTEN_HOST=0.0.0.0 OSIA_TLS_CERTFILE=… OSIA_TLS_KEYFILE=…
 
 Port d'écoute : `OSIA_LISTEN_PORT` (défaut 8471). En mode desktop, toute écoute hors loopback est refusée au démarrage.
 
+### Connecter un fournisseur IA dans l’interface
+
+1. Ouvre **Paramètres → Fournisseurs IA** et choisis **Mistral API**, **Serveur IA local** ou **Autre API cloud**.
+2. Renseigne la clé et, pour un autre fournisseur, l’adresse de base de son API. Pour le mode local, cette adresse désigne la boucle locale de la machine qui exécute OSIA. Le mode cloud personnalisé requiert une API HTTPS compatible avec `/models`, `/chat/completions` et les réponses JSON structurées.
+3. Clique sur **Tester et lister les modèles**, choisis un identifiant proposé ou saisis-le, puis clique sur **Enregistrer**. Le test liste les modèles avec les champs saisis et n’envoie aucun prompt.
+4. Clique sur **Utiliser ce fournisseur**. Pour un fournisseur cloud, vérifie les tarifs d’entrée et de sortie en euros par million de tokens, coche **Autoriser les appels payants** dans **Paramètres globaux** puis indique un budget positif dans l’investigation.
+
+L’adresse, le modèle, les tarifs et le choix du fournisseur sont conservés. Une clé saisie ici reste dans la mémoire du serveur OSIA et doit être ressaisie après son redémarrage. Les configurations Mistral existantes par variable d’environnement ou coffre CLI restent utilisables sur l’adresse correspondante.
+
 ## 5. Premier pas (CLI)
 
 ```bash

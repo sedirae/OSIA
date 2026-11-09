@@ -158,8 +158,15 @@ def install(args: argparse.Namespace) -> None:
         private_dir(directory)
     bin_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
     print("Installation d’OSIA et de ses dépendances Python…", flush=True)
-    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-    subprocess.run([str(venv / "bin/python"), "-m", "pip", "install", str(ROOT)], check=True)
+    # Le répertoire a été vérifié absent : en cas de réseau coupé/venv incomplet,
+    # supprimer uniquement cet environnement neuf pour permettre une nouvelle tentative.
+    venv.mkdir(mode=0o700)
+    try:
+        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+        subprocess.run([str(venv / "bin/python"), "-m", "pip", "install", str(ROOT)], check=True)
+    except BaseException:
+        shutil.rmtree(venv)
+        raise
 
     postgres = None
     try:

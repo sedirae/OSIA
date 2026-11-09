@@ -5,7 +5,11 @@
   'use strict';
 
   var storage = (function () {
-    try { return window.sessionStorage; } catch (e) { return { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} }; }
+    return {
+      getItem: function (key) { try { return window.sessionStorage.getItem(key); } catch (e) { return null; } },
+      setItem: function (key, value) { try { window.sessionStorage.setItem(key, value); } catch (e) {} },
+      removeItem: function (key) { try { window.sessionStorage.removeItem(key); } catch (e) {} }
+    };
   })();
 
   var SUPPORT_LABEL = { documente: 'documenté', corrobore: 'corrobore', a_confirmer: 'à confirmer', contradictoire: 'contradictoire', non_etabli: 'non établi' };
@@ -31,7 +35,9 @@
     cursor: 0,
     sseAbort: null,
     lastObjectiveAt: null,
-    refreshTimer: null
+    refreshTimer: null,
+    routeVersion: 0,
+    loadVersion: 0
   };
 
   function $(id) { return document.getElementById(id); }
@@ -49,6 +55,29 @@
   }
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function authHeaders() { var h = {}; if (state.token) h['Authorization'] = 'Bearer ' + state.token; return h; }
+  function leaveInvestigation() {
+    state.routeVersion += 1;
+    state.invId = null;
+    if (state.sseAbort) state.sseAbort.abort();
+    state.sseAbort = null;
+    if (state.refreshTimer) clearTimeout(state.refreshTimer);
+    state.refreshTimer = null;
+    return state.routeVersion;
+  }
+  function forgetSession() {
+    leaveInvestigation();
+    state.token = '';
+    storage.removeItem('osia_token');
+    state.inv = null; state.graph = { entities: [], relations: [] };
+    state.branches = []; state.assertions = []; state.decisions = []; state.proofs = [];
+    state.tasks = []; state.matches = []; state.journal = []; state.selected = null;
+    state.budget = null; state.objectif = null;
+    if ($('auth-token')) $('auth-token').value = '';
+    if ($('app')) {
+      clear($('app'));
+      $('app').appendChild(el('p', { text: 'Connecte-toi pour accéder aux investigations.' }));
+    }
+  }
   function showAuth() {
     var d = $('auth-dialog');
     if (d && d.showModal) d.showModal();
@@ -59,7 +88,7 @@
     opts = opts || {};
     opts.headers = Object.assign({}, authHeaders(), opts.headers || {});
     var resp = await fetch(path, opts);
-    if (resp.status === 401) { showAuth(); var err = new Error('unauthorized'); err.status = 401; throw err; }
+    if (resp.status === 401) { forgetSession(); showAuth(); var err = new Error('unauthorized'); err.status = 401; throw err; }
     return resp;
   }
   async function apiJson(path, opts) {
@@ -107,6 +136,7 @@
       try { res = await doLogin(token); } catch (e) { authError('Connexion impossible'); return; }
       if (res.error) { authError(res.error); return; }
       state.token = res.token;
+      $('auth-token').value = '';
       storage.setItem('osia_token', state.token);
       var d = $('auth-dialog');
       if (d && d.close) d.close();
@@ -117,8 +147,7 @@
     var logout = $('auth-logout');
     if (logout) logout.addEventListener('click', async function () {
       try { await api('/api/v1/auth/logout', { method: 'POST' }); } catch (e) { /* session déjà invalide */ }
-      state.token = '';
-      storage.removeItem('osia_token');
+      forgetSession();
       var d = $('auth-dialog');
       if (d && d.close) d.close();
       showAuth();
@@ -165,7 +194,7 @@
   }
 
   async function renderHome() {
-    state.invId = null;
+    var version = leaveInvestigation();
     var app = $('app');
     if (!app) return;
     clear(app);
@@ -178,7 +207,8 @@
     det.appendChild(el('summary', { text: 'Paramètres avancés (profil, limites)' }));
     det.appendChild(el('label', { class: 'field' }, [el('span', { text: 'Profil' }), el('select', { name: 'profile_id', id: 'profile-select' })]));
     ['max_rebonds', 'max_source_requests', 'max_ai_calls', 'max_duration_seconds', 'max_cost_cents'].forEach(function (k) {
-      det.appendChild(el('label', { class: 'field' }, [el('span', { text: 'Surcharge ' + k + ' (vide = profil)' }), el('input', { type: 'number', name: 'lim_' + k, min: '0' })]));
+      var label = k === 'max_cost_cents' ? 'Budget maximal (centimes d’euro, vide = profil)' : 'Surcharge ' + k + ' (vide = profil)';
+      det.appendChild(el('label', { class: 'field' }, [el('span', { text: label }), el('input', { type: 'number', name: 'lim_' + k, min: '0' })]));
     });
     form.appendChild(det);
     form.appendChild(el('button', { type: 'submit', class: 'primary', text: 'Lancer la recherche' }));
@@ -193,6 +223,7 @@
 
     try {
       var profiles = await apiJson('/api/v1/profiles');
+      if (version !== state.routeVersion) return;
       var sel = $('profile-select');
       if (sel) profiles.forEach(function (p) {
         var o = el('option', { value: p.id, text: p.name + (p.is_default ? ' (défaut)' : '') });
@@ -203,6 +234,7 @@
 
     try {
       var invs = await apiJson('/api/v1/investigations');
+      if (version !== state.routeVersion) return;
       clear(ul);
       if (!invs.length) ul.appendChild(el('li', { class: 'muted', text: 'Aucune investigation pour le moment.' }));
       invs.forEach(function (inv) {
@@ -252,68 +284,214 @@
   }
 
   var SETTING_INPUT_TYPES = { paid_calls_enabled: 'bool', timezone: 'text' };
+  var SETTING_LABELS = { paid_calls_enabled: 'Autoriser les appels payants', global_monthly_cap_cents: 'Plafond mensuel global (centimes d’euro)' };
   var LIMIT_KEYS = ['max_rebonds', 'max_source_requests', 'max_ai_calls', 'max_duration_seconds', 'max_cost_cents'];
   var TRUST_LABEL = { official: 'officiel', experimental: 'expérimental', community: 'communautaire' };
 
   function settingsErrorNode() { return el('p', { class: 'muted small', role: 'alert' }); }
 
   async function renderSettings() {
-    state.invId = null;
+    var version = leaveInvestigation();
     var app = $('app');
     if (!app) return;
     clear(app);
     app.appendChild(el('h1', { text: 'Paramètres' }));
-    app.appendChild(el('p', { class: 'muted small', text: 'Configuration de l’instance. Aucune clé API n’est saisie ni affichée ici (D2 §4.3 / T5.5) : les secrets se gèrent dans le coffre serveur, en CLI (`osia secrets set <nom>`).' }));
+    app.appendChild(el('p', { class: 'muted small', text: 'Configure les fournisseurs, les budgets, les profils et les sources de cette instance.' }));
     await renderAiCard(app);
+    if (version !== state.routeVersion) return;
     await renderGlobalSettingsCard(app);
+    if (version !== state.routeVersion) return;
     await renderProfilesCard(app);
+    if (version !== state.routeVersion) return;
     await renderConnectorsCard(app);
+    if (version !== state.routeVersion) return;
     await renderSecretsCard(app);
   }
+
+  var AI_PROVIDER_LABELS = {
+    mistral: 'Mistral API',
+    local: 'Serveur IA local (compatible OpenAI)',
+    compatible: 'Autre API cloud (compatible OpenAI)',
+    simulated: 'Mode simulé'
+  };
 
   async function renderAiCard(app) {
     var card = el('section', { class: 'card' });
     card.appendChild(el('h2', { text: 'Fournisseurs IA' }));
     var err = settingsErrorNode();
-    card.appendChild(err);
+    app.appendChild(card);
     try {
       var data = await apiJson('/api/v1/ai/providers');
-      var ul = el('ul', { class: 'plain' });
-      data.providers.forEach(function (p) {
-        var li = el('li', {});
-        li.appendChild(el('strong', { text: p.key }));
-        li.appendChild(document.createTextNode(' — ' + p.provider + ':' + p.model + ' '));
-        li.appendChild(badge(p.paid ? 'payant, borne ' + fmtCents(p.cost_per_call_cents) + '/appel' : 'non payant', p.paid ? 'a_confirmer' : 'documente'));
-        if (p.roles && p.roles.length) li.appendChild(document.createTextNode(' — rôles : ' + p.roles.join(', ')));
-        if (p.fallback_to) li.appendChild(document.createTextNode(' — repli autorisé vers ' + p.fallback_to));
-        var btn = el('button', { type: 'button', class: 'small', text: 'Tester la connexion (non facturé)' });
-        btn.addEventListener('click', async function () {
-          btn.disabled = true; err.textContent = '';
-          try {
-            var r = await apiJson('/api/v1/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider_key: p.key }) });
-            var n = r && r.models ? r.models.length : 0;
-            err.textContent = p.key + ' : connexion OK, ' + n + ' modèle(s) listé(s).';
-          } catch (e) {
-            if (e.status !== 401) err.textContent = p.key + ' : test échoué — ' + e.message;
-          } finally { btn.disabled = false; }
-        });
-        li.appendChild(document.createTextNode(' '));
-        li.appendChild(btn);
-        ul.appendChild(li);
+      var current = el('p', { class: 'small', role: 'status' });
+      var form = el('form', { autocomplete: 'off' });
+      var provider = el('select', { id: 'ai-provider' });
+      Object.keys(AI_PROVIDER_LABELS).forEach(function (key) {
+        provider.appendChild(el('option', { value: key, text: AI_PROVIDER_LABELS[key] }));
       });
-      card.appendChild(ul);
+      var fields = el('fieldset', {});
+      var endpoint = el('input', { id: 'ai-endpoint', type: 'url', maxlength: '512', required: '', spellcheck: 'false' });
+      var secret = el('input', { id: 'ai-key', type: 'password', autocomplete: 'new-password', maxlength: '4096', 'aria-describedby': 'ai-key-help' });
+      var keyHelp = el('p', { id: 'ai-key-help', class: 'muted small' });
+      var model = el('input', { id: 'ai-model', type: 'text', list: 'ai-models', maxlength: '160', required: '', spellcheck: 'false' });
+      var models = el('datalist', { id: 'ai-models' });
+      var cloudPrices = el('div', {});
+      var inputPrice = el('input', { id: 'ai-input-price', type: 'number', min: '0', step: '0.01' });
+      var outputPrice = el('input', { id: 'ai-output-price', type: 'number', min: '0', step: '0.01' });
+      var save = el('button', { type: 'submit', class: 'primary', text: 'Enregistrer' });
+      var test = el('button', { type: 'button', text: 'Tester et lister les modèles' });
+      var activate = el('button', { type: 'button', text: 'Utiliser ce fournisseur' });
+      var status = el('p', { role: 'status', class: 'small' });
+      var dirty = false;
       var fbc = el('input', { type: 'checkbox', id: 'fb-local-cloud' });
       fbc.checked = !!data.fallback_local_to_cloud_authorized;
-      fbc.addEventListener('change', async function () {
-        err.textContent = '';
-        try {
-          await apiJson('/api/v1/ai/fallback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: fbc.checked }) });
-          err.textContent = fbc.checked ? 'Repli local → cloud autorisé (persisté, audité).' : 'Repli local → cloud révoqué.';
-        } catch (e) { if (e.status !== 401) { err.textContent = 'Modification refusée : ' + e.message; fbc.checked = !fbc.checked; } }
+
+      function field(label, input) {
+        return el('label', { class: 'field' }, [el('span', { text: label }), input]);
+      }
+      function jsonRequest(method, body) {
+        return { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+      }
+      function price(cents) { return cents == null ? '' : String(cents / 100); }
+      function cents(input) { return input.value === '' ? null : Math.round(Number(input.value) * 100); }
+      function credentials() {
+        var body = { base_url: endpoint.value.trim() };
+        if (secret.value.trim()) {
+          if (window.isSecureContext === false) throw new Error('Ouvre OSIA en HTTPS ou depuis son adresse locale pour saisir une clé API.');
+          body.api_key = secret.value.trim();
+        }
+        return body;
+      }
+      function refreshStatus() {
+        var cfg = data.configurations[data.selected];
+        var modelName = data.active_model ? ' · ' + data.active_model : '';
+        current.textContent = 'Fournisseur actif : ' + AI_PROVIDER_LABELS[data.selected]
+          + modelName + (cfg && !cfg.ready ? ' — clé API à renseigner.' : '');
+        var edited = data.configurations[provider.value];
+        activate.disabled = dirty || provider.value === data.selected || (!!edited && !edited.ready);
+      }
+      function loadFields() {
+        var key = provider.value;
+        var cfg = data.configurations[key];
+        fields.hidden = !cfg;
+        fields.disabled = !cfg;
+        endpoint.value = cfg ? cfg.base_url : '';
+        endpoint.readOnly = key === 'mistral';
+        secret.value = '';
+        secret.placeholder = cfg && cfg.has_key ? 'Clé déjà renseignée' : '';
+        keyHelp.textContent = (cfg && cfg.has_key ? 'Laisse le champ vide pour garder la clé de cette adresse. ' : '')
+          + 'La clé saisie reste en mémoire jusqu’à l’arrêt du serveur OSIA.';
+        if (cfg && cfg.server_endpoint) {
+          keyHelp.textContent += ' Le test utilise la connexion définie côté serveur tant que tu ne modifies pas ces champs.';
+        }
+        model.value = cfg ? cfg.model : '';
+        cloudPrices.hidden = key === 'local';
+        inputPrice.disabled = outputPrice.disabled = key === 'local';
+        inputPrice.value = price(cfg && cfg.input_cents_per_mtok);
+        outputPrice.value = price(cfg && cfg.output_cents_per_mtok);
+        clear(models);
+        dirty = false;
+        refreshStatus();
+      }
+      async function runAiAction(action) {
+        var disabled = fields.disabled;
+        fields.disabled = provider.disabled = activate.disabled = fbc.disabled = true;
+        err.textContent = status.textContent = '';
+        try { await action(); }
+        catch (e) { if (e.status !== 401) err.textContent = e.message; }
+        finally {
+          fields.disabled = disabled;
+          provider.disabled = fbc.disabled = false;
+          refreshStatus();
+        }
+      }
+
+      form.appendChild(field('Fournisseur à configurer', provider));
+      fields.appendChild(el('legend', { text: 'Connexion API' }));
+      fields.appendChild(field('Adresse de base de l’API', endpoint));
+      fields.appendChild(field('Clé API', secret));
+      fields.appendChild(keyHelp);
+      fields.appendChild(field('Modèle', model));
+      fields.appendChild(models);
+      cloudPrices.appendChild(field('Tarif d’entrée (€ par million de tokens)', inputPrice));
+      cloudPrices.appendChild(field('Tarif de sortie (€ par million de tokens)', outputPrice));
+      cloudPrices.appendChild(el('p', { class: 'muted small', text: 'Vérifie les tarifs du modèle chez le fournisseur. Pour utiliser le cloud, autorise les appels payants dans Paramètres globaux et fixe un budget dans l’investigation.' }));
+      fields.appendChild(cloudPrices);
+      fields.appendChild(el('div', { class: 'row' }, [test, save]));
+      form.appendChild(fields);
+      form.appendChild(activate);
+      card.appendChild(current);
+      card.appendChild(form);
+      card.appendChild(status);
+      card.appendChild(err);
+      card.appendChild(el('label', { class: 'field' }, [fbc, el('span', { text: 'Autoriser le repli du modèle local vers Mistral, dans la limite du budget de l’investigation.' })]));
+
+      provider.value = data.selected === 'simulated' ? 'mistral' : data.selected;
+      loadFields();
+      provider.addEventListener('change', function () {
+        err.textContent = status.textContent = '';
+        loadFields();
       });
-      card.appendChild(el('label', { class: 'field' }, [fbc, el('span', { text: 'Autoriser le repli local → cloud (autorisation de transmission persistée, T8.9 ; un repli payant reste soumis à la réservation budgétaire)' })]));
-    } catch (e) { if (e.status !== 401) err.textContent = 'Fournisseurs indisponibles : ' + e.message; }
-    app.appendChild(card);
+      fields.addEventListener('input', function (ev) {
+        if (ev.target === endpoint || ev.target === secret) clear(models);
+        dirty = true;
+        refreshStatus();
+      });
+      test.addEventListener('click', function () {
+        if (!endpoint.reportValidity()) return;
+        return runAiAction(async function () {
+          var result = !dirty && data.configurations[provider.value].server_endpoint
+            ? await apiJson('/api/v1/ai/test', jsonRequest('POST', { provider_key: provider.value }))
+            : await apiJson('/api/v1/ai/providers/' + provider.value + '/test', jsonRequest('POST', credentials()));
+          clear(models);
+          result.models.forEach(function (id) { models.appendChild(el('option', { value: id })); });
+          if (!model.value && result.models.length === 1) {
+            model.value = result.models[0];
+            dirty = true;
+          }
+          status.textContent = result.models.length
+            ? 'Connexion réussie. ' + result.models.length + ' modèle(s) disponible(s) dans le champ Modèle.'
+            : 'Connexion réussie. La liste est vide. Tu peux saisir l’identifiant du modèle manuellement.';
+        });
+      });
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        if (provider.value === 'simulated') return;
+        return runAiAction(async function () {
+          var body = Object.assign(credentials(), { model: model.value.trim() });
+          if (provider.value !== 'local') {
+            body.input_cents_per_mtok = cents(inputPrice);
+            body.output_cents_per_mtok = cents(outputPrice);
+          }
+          var pending = apiJson('/api/v1/ai/providers/' + provider.value, jsonRequest('PUT', body));
+          secret.value = '';
+          data = await pending;
+          loadFields();
+          status.textContent = 'Configuration enregistrée.';
+        });
+      });
+      activate.addEventListener('click', function () {
+        var key = provider.value;
+        if (key !== 'local' && key !== 'simulated' && !window.confirm(
+          'Autoriser OSIA à transmettre à ' + AI_PROVIDER_LABELS[key] + ' les données nécessaires aux futurs appels IA, sous réserve du budget de chaque investigation ?'
+        )) return;
+        return runAiAction(async function () {
+          data = await apiJson('/api/v1/ai/selection/' + key, { method: 'PUT' });
+          status.textContent = AI_PROVIDER_LABELS[key] + ' est actif pour la planification, l’extraction et la synthèse.';
+        });
+      });
+      fbc.addEventListener('change', function () {
+        var enabled = fbc.checked;
+        return runAiAction(async function () {
+          try {
+            await apiJson('/api/v1/ai/fallback', jsonRequest('POST', { enabled: enabled }));
+            status.textContent = enabled ? 'Repli vers Mistral autorisé.' : 'Repli vers Mistral révoqué.';
+          } catch (e) { fbc.checked = !enabled; throw e; }
+        });
+      });
+    } catch (e) {
+      if (e.status !== 401) err.textContent = 'Fournisseurs indisponibles : ' + e.message;
+      card.appendChild(err);
+    }
   }
 
   async function renderGlobalSettingsCard(app) {
@@ -332,7 +510,7 @@
         else if (t === 'number') { inp.type = 'number'; inp.step = '1'; inp.min = '0'; inp.value = String(data.settings[k] == null ? '' : data.settings[k]); }
         else { inp.type = 'text'; inp.value = String(data.settings[k] == null ? '' : data.settings[k]); }
         inputs[k] = { inp: inp, type: t };
-        form.appendChild(el('label', { class: 'field' }, [el('span', { text: k }), inp]));
+        form.appendChild(el('label', { class: 'field' }, [el('span', { text: SETTING_LABELS[k] || k }), inp]));
       });
       form.appendChild(el('button', { type: 'submit', class: 'primary', text: 'Enregistrer' }));
       form.addEventListener('submit', async function (ev) {
@@ -443,7 +621,7 @@
   async function renderSecretsCard(app) {
     var card = el('section', { class: 'card' });
     card.appendChild(el('h2', { text: 'Secrets (coffre)' }));
-    card.appendChild(el('p', { class: 'muted small', text: 'Noms enregistrés uniquement — les valeurs ne quittent jamais le serveur et ne sont jamais saisies dans le navigateur. Gestion en CLI : `osia secrets list|set|delete`.' }));
+    card.appendChild(el('p', { class: 'muted small', text: 'Ce coffre liste uniquement les noms des secrets gérés par la CLI. Les clés saisies dans Fournisseurs IA sont temporaires.' }));
     try {
       var data = await apiJson('/api/v1/secrets');
       var ul = el('ul', { class: 'plain' });
@@ -455,6 +633,8 @@
   }
 
   async function loadInvestigationData(id) {
+    var version = state.routeVersion;
+    var loadVersion = ++state.loadVersion;
     var base = '/api/v1/investigations/' + encodeURIComponent(id);
     var q = state.branchFilter ? '?branch_id=' + encodeURIComponent(state.branchFilter) : '';
     var results = await Promise.all([
@@ -469,17 +649,21 @@
       apiJson(base + '/objectif' + q),
       apiJson(base + '/matches')
     ]);
+    if (version !== state.routeVersion || id !== state.invId || loadVersion !== state.loadVersion) return false;
     state.inv = results[0]; state.branches = results[1]; state.graph = results[2];
     state.assertions = results[3]; state.decisions = results[4]; state.proofs = results[5];
     state.budget = results[6]; state.tasks = results[7]; state.objectif = results[8]; state.matches = results[9];
+    return true;
   }
 
   async function renderInvestigation(id) {
+    var version = leaveInvestigation();
+    state.branchFilter = null;
+    state.selected = null;
     state.invId = id;
-    if (state.sseAbort) { state.sseAbort.abort(); state.sseAbort = null; }
-    try { await loadInvestigationData(id); }
+    try { if (!await loadInvestigationData(id)) return; }
     catch (e) {
-      if (e.status === 401) return;
+      if (e.status === 401 || version !== state.routeVersion) return;
       var app = $('app');
       if (!app) return;
       clear(app);
@@ -1125,6 +1309,8 @@
     imp.appendChild(el('summary', { text: 'Import supervisé d’une archive .osia (T7.6)' }));
     var fi = el('input', { type: 'file', accept: '.osia,application/zip', id: 'import-file' });
     imp.appendChild(fi);
+    var importSecret = el('input', { type: 'password', autocomplete: 'off', id: 'import-passphrase' });
+    imp.appendChild(el('label', { class: 'field' }, [el('span', { text: 'Phrase secrète (archive chiffrée uniquement)' }), importSecret]));
     var prevBtn = el('button', { type: 'button', text: 'Prévisualiser' });
     var applyAdd = el('button', { type: 'button', text: 'Appliquer (ajout)' });
     var applyMerge = el('button', { type: 'button', text: 'Appliquer (fusion)' });
@@ -1132,21 +1318,50 @@
     imp.appendChild(el('p', { class: 'row' }, [prevBtn, applyAdd, applyMerge]));
     imp.appendChild(prevBox);
     var currentFile = null;
-    fi.addEventListener('change', function () { currentFile = fi.files && fi.files[0] ? fi.files[0] : null; });
+    var previewedFile = null;
+    function importHeaders() {
+      var headers = { 'Content-Type': 'application/octet-stream' };
+      if (importSecret.value) {
+        var bytes = new TextEncoder().encode(importSecret.value);
+        headers['X-OSIA-Archive-Passphrase-B64'] = btoa(Array.from(bytes, function (b) { return String.fromCharCode(b); }).join(''));
+      }
+      return headers;
+    }
+    importSecret.addEventListener('input', function () {
+      previewedFile = null;
+      applyAdd.disabled = applyMerge.disabled = true;
+    });
+    applyAdd.disabled = applyMerge.disabled = true;
+    fi.addEventListener('change', function () {
+      currentFile = fi.files && fi.files[0] ? fi.files[0] : null;
+      previewedFile = null;
+      applyAdd.disabled = applyMerge.disabled = true;
+      prevBox.textContent = '';
+    });
     prevBtn.addEventListener('click', async function () {
       if (!currentFile) return;
+      var file = currentFile;
+      var phrase = importSecret.value;
+      previewedFile = null;
+      applyAdd.disabled = applyMerge.disabled = true;
       try {
-        var r = await api('/api/v1/import/preview', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: currentFile });
-        prevBox.textContent = JSON.stringify(await r.json(), null, 2).slice(0, 4000);
+        var result = await apiJson('/api/v1/import/preview', { method: 'POST', headers: importHeaders(), body: file });
+        if (file !== currentFile || phrase !== importSecret.value) return;
+        prevBox.textContent = JSON.stringify(result, null, 2).slice(0, 4000);
+        previewedFile = file;
+        applyAdd.disabled = applyMerge.disabled = false;
       } catch (e) { if (e.status !== 401) prevBox.textContent = 'Prévisualisation refusée : ' + e.message; }
     });
     async function apply(mode) {
-      if (!currentFile) return;
+      if (!currentFile || previewedFile !== currentFile) return;
+      applyAdd.disabled = applyMerge.disabled = true;
       try {
-        var r = await api('/api/v1/import/apply?mode=' + mode + '&on_conflict=fail', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: currentFile });
-        if (r.status === 409) { prevBox.textContent = 'Conflits détectés (aucun écrasement silencieux) : ' + JSON.stringify((await r.json()).error.details); return; }
-        prevBox.textContent = 'Import appliqué (' + mode + ') : ' + JSON.stringify(await r.json()).slice(0, 2000);
+        var result = await apiJson('/api/v1/import/apply?mode=' + mode + '&on_conflict=fail', { method: 'POST', headers: importHeaders(), body: currentFile });
+        prevBox.textContent = 'Import appliqué (' + mode + ') : ' + JSON.stringify(result).slice(0, 2000);
+        previewedFile = null;
+        importSecret.value = '';
       } catch (e) { if (e.status !== 401) prevBox.textContent = 'Import refusé : ' + e.message; }
+      finally { applyAdd.disabled = applyMerge.disabled = previewedFile !== currentFile; }
     }
     applyAdd.addEventListener('click', function () { apply('add'); });
     applyMerge.addEventListener('click', function () { apply('merge'); });
@@ -1212,13 +1427,15 @@
     while (!ctrl.signal.aborted) {
       try {
         var resp = await fetch(base + cursor, { headers: Object.assign({ Accept: 'text/event-stream' }, authHeaders()), signal: ctrl.signal });
-        if (resp.status === 401) { showAuth(); return; }
+        if (resp.status === 401) { forgetSession(); showAuth(); return; }
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
         if (!resp.body) { await sleep(2000); continue; }
         var reader = resp.body.getReader();
         var dec = new TextDecoder();
         var buf = '';
         while (true) {
           var chunk = await reader.read();
+          if (ctrl.signal.aborted) return;
           if (chunk.done) break;
           buf += dec.decode(chunk.value, { stream: true });
           var idx;
@@ -1232,8 +1449,8 @@
         }
       } catch (e) {
         if (ctrl.signal.aborted) return;
-        await sleep(2000);
       }
+      if (!ctrl.signal.aborted) await sleep(2000);
     }
   }
   function handleSseBlock(block) {
@@ -1272,7 +1489,7 @@
   }
   async function refreshData() {
     if (!state.invId) return;
-    try { await loadInvestigationData(state.invId); } catch (e) { if (e.status === 401) return; }
+    try { if (!await loadInvestigationData(state.invId)) return; } catch (e) { return; }
     if (!$('layout')) return;
     renderLayout();
     if (state.selected) select(state.selected.type, state.selected.id);

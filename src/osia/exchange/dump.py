@@ -7,6 +7,8 @@ from typing import Any, Optional
 
 import asyncpg
 
+from .archive import ArchiveError
+
 # Tables exportables d'une investigation, dans l'ordre des dependances FK pour l'import.
 # refs : colonnes referencant une autre table (pour le remap d'identifiants en mode "add").
 TABLES: dict[str, dict[str, Any]] = {
@@ -401,6 +403,7 @@ async def detect_conflicts(
     payload: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """Detecte les collisions d'identifiants et les contenus divergents (T7.6, D5.7.2)."""
+    validate_payload(payload)
     conflicts: list[dict[str, Any]] = []
     for table in IMPORT_ORDER:
         spec = TABLES[table]
@@ -434,6 +437,8 @@ async def import_payload(
     Les investigations importees en "running" passent en "suspended" : aucune reprise de
     recherche automatique (D5.7.2)."""
     from ..ids import new_id
+
+    validate_payload(payload)
 
     report: dict[str, Any] = {"mode": mode, "inserted": {}, "skipped": {}, "remapped": 0, "conflicts": [], "normalized_states": []}
     deferred_updates: list[tuple[str, str, Any, str, Any]] = []
@@ -562,6 +567,23 @@ async def import_payload(
                 report.setdefault("dangling_refs", []).extend(dangling)
             report["integrity"] = "dangling" if report.get("dangling_refs") else "ok"
     return report
+
+
+def validate_payload(payload: dict) -> None:
+    """Vérifier la forme des lignes avant accès base, remappage et staging."""
+    for table, rows in payload.items():
+        if table not in TABLES or not isinstance(rows, list):
+            raise ArchiveError("table d’archive inconnue ou invalide")
+        spec = TABLES[table]
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ArchiveError(f"ligne invalide dans {table}")
+            key = row.get(spec["pk"])
+            valid = type(key) is int if spec.get("serial") else isinstance(key, str) and bool(key)
+            if not valid or key in seen:
+                raise ArchiveError(f"identifiant absent, invalide ou dupliqué dans {table}")
+            seen.add(key)
 
 
 _ID_TABLES = [t for t in IMPORT_ORDER if not TABLES[t].get("serial") and t != "proof_files"]

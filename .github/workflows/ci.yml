@@ -23,7 +23,16 @@ jobs:
           cache: pip
       - name: Installation (dépendances + extra test)
         run: python -m pip install -e ".[test]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Installation Chromium pour la recette de l’interface
+        run: |
+          npm install --prefix "$RUNNER_TEMP/osia-browser" playwright@1.62.1
+          "$RUNNER_TEMP/osia-browser/node_modules/.bin/playwright" install --with-deps chromium
       - name: Tests pytest (T3.14 — multicouches, simulations, non-régression)
         # Suite complète, sans exclusion (audit F16 : le test budgétaire désélectionné était
         # corrigé — profil "approfondi" — et réactivé ; aucune désélection inexpliquée).
-        run: python -m pytest -q
+        env:
+          OSIA_BROWSER_TESTS: "1"
+        run: NODE_PATH="$RUNNER_TEMP/osia-browser/node_modules" python -m pytest -q
