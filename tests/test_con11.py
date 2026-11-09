@@ -195,7 +195,7 @@ async def test_repli_autorise_avec_budget_fonctionne(engine):
 
 async def test_api_ai_providers_fallback_test(engine):
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/ai/providers")
         assert r.status_code == 200
         body = r.json()

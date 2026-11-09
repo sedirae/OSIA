@@ -1,22 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import json
 import pathlib
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypeVar
+from urllib.parse import urlsplit
 
 import asyncpg
 from fastapi import FastAPI, Header, Request
 from pydantic import ValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from ..ai import AIAdapter, AIAdapterError
+from ..ai.connections import ConnectionCredentials, ConnectionUpdate, ProviderKey
 from ..backup import BackupError
 from ..engine import Engine
+from ..config import is_local_host
 from ..exchange import ArchiveError, CryptoError, ImportConflictError
 from ..exchange.service import ExchangeService
+from ..exchange.archive import MAX_TOTAL_BYTES
 from ..ids import new_id
+from ..netguard import NetworkDeny
 from ..version import __version__, is_newer
 from ..models import (
     AIFallbackRequest,
@@ -45,6 +53,10 @@ from ..models import (
     validate_setting_value,
 )
 
+ConnectionBody = TypeVar("ConnectionBody", bound=ConnectionCredentials)
+MAX_IMPORT_UPLOAD_BYTES = MAX_TOTAL_BYTES
+MAX_IMPORT_JSON_BYTES = 16_384
+
 
 def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     """EXEC-03 : le frontend web est facultatif. `web_ui=False` (ou le réglage
@@ -63,6 +75,27 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     )
     settings = engine.settings
     serve_web_ui = settings.web_ui_enabled if web_ui is None else web_ui
+
+    @app.middleware("http")
+    async def protect_local_access(request: Request, call_next):
+        # En mode desktop sans jeton, l'écoute loopback ne suffit pas contre le
+        # rebinding DNS ou une page tierce qui envoie une requête au service local.
+        if settings.mode == "desktop":
+            try:
+                host = request.url.hostname or ""
+                origin = request.headers.get("origin")
+                if not is_local_host(host.lower().rstrip(".")):
+                    return JSONResponse(status_code=400, content={"error": {"code": "invalid_host", "message": "Utilise localhost ou l’adresse de boucle locale."}})
+                if origin is not None:
+                    parsed = urlsplit(origin)
+                    default = lambda scheme: 443 if scheme == "https" else 80
+                    source = (parsed.scheme, parsed.hostname, parsed.port or default(parsed.scheme))
+                    target = (request.url.scheme, host, request.url.port or default(request.url.scheme))
+                    if source != target:
+                        return JSONResponse(status_code=403, content={"error": {"code": "invalid_origin", "message": "Origine de la requête refusée."}})
+            except ValueError:
+                return JSONResponse(status_code=400, content={"error": {"code": "invalid_host", "message": "Adresse invalide."}})
+        return await call_next(request)
 
     def _client(request: Request) -> str | None:
         return request.client.host if request.client else None
@@ -123,6 +156,8 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     @app.get("/api/v1/health")
     async def health(request: Request) -> dict:
         await require_auth(request)
+        if engine._runner is not None and engine._runner.done():
+            raise ApiError("engine_unavailable", "L’ordonnanceur est arrêté. Redémarre le service après vérification du journal.", 503)
         return {"status": "ok", "version": __version__, "mode": settings.mode}
 
     @app.get("/api/v1/system/version")
@@ -150,8 +185,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
             engine.audit.log("auth.login", "failure", client=_client(request))
             raise ApiError("unauthorized", "jeton administrateur invalide", 401)
         token, expires = await engine.sessions.create(client_info=_client(request))
-        engine.audit.log("auth.login", "success", detail={"ttl_hours": settings.session_ttl_hours}, client=_client(request))
-        return {"session_token": token, "expires_at": expires.isoformat(), "ttl_hours": settings.session_ttl_hours}
+        ttl_hours = int(engine.sessions.ttl.total_seconds() / 3600)
+        engine.audit.log("auth.login", "success", detail={"ttl_hours": ttl_hours}, client=_client(request))
+        return {"session_token": token, "expires_at": expires.isoformat(), "ttl_hours": ttl_hours}
 
     @app.post("/api/v1/auth/logout")
     async def logout(request: Request) -> dict:
@@ -296,15 +332,17 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     ) -> JSONResponse:
         await require_auth(request)
         key = idempotency_key or body.idempotency_key
-        if key:
-            body.idempotency_key = key
-            existing = await engine.repo.find_investigation_by_key(key)
-            if existing is not None:
-                if existing["title"] != body.title:
-                    raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
-                return JSONResponse(status_code=200, content=_inv_json(existing))
         try:
-            inv = await engine.orchestrator.start_investigation(body)
+            async with engine.ai_connections.lock:
+                if key:
+                    body.idempotency_key = key
+                    existing = await engine.repo.find_investigation_by_key(key)
+                    if existing is not None:
+                        if existing["title"] != body.title:
+                            raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
+                        return JSONResponse(status_code=200, content=_inv_json(existing))
+                engine.ai_connections.ensure_ready()
+                inv = await engine.orchestrator.start_investigation(body)
         except asyncpg.UniqueViolationError:
             existing = await engine.repo.find_investigation_by_key(key)
             if existing is None:
@@ -338,7 +376,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     @app.post("/api/v1/investigations/{investigation_id}/resume")
     async def resume_investigation(investigation_id: str, request: Request) -> dict:
         await require_auth(request)
-        inv = await engine.orchestrator.resume(investigation_id)
+        async with engine.ai_connections.lock:
+            engine.ai_connections.ensure_ready()
+            inv = await engine.orchestrator.resume(investigation_id)
         return _inv_json(inv)
 
     @app.post("/api/v1/investigations/{investigation_id}/branches", status_code=201)
@@ -352,7 +392,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         if idempotency_key:
             body.idempotency_key = idempotency_key
         try:
-            branch = await engine.orchestrator.create_branch(investigation_id, body)
+            async with engine.ai_connections.lock:
+                engine.ai_connections.ensure_ready()
+                branch = await engine.orchestrator.create_branch(investigation_id, body)
         except asyncpg.UniqueViolationError:
             existing = await engine.repo.find_branch_by_key(idempotency_key or "")
             if existing is None:
@@ -610,20 +652,59 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         _audit_op("op.export.download", request, {"export_id": export_id, "file": file})
         return FileResponse(path, filename=file)
 
+    async def import_json(request: Request, model):
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > MAX_IMPORT_JSON_BYTES:
+                raise ApiError("payload_too_large", "Corps JSON trop volumineux.", 413)
+            raw.extend(chunk)
+        try:
+            return model.model_validate_json(raw)
+        except ValidationError:
+            # Ne jamais inclure le corps reçu : il peut contenir une phrase secrète.
+            raise ApiError("bad_request", "Corps JSON invalide : vérifie le chemin et les options d’import.", 400) from None
+
+    async def import_upload(request: Request) -> pathlib.Path:
+        tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
+        try:
+            total = 0
+            with tmp.open("xb") as handle:
+                async for chunk in request.stream():
+                    total += len(chunk)
+                    if total > MAX_IMPORT_UPLOAD_BYTES:
+                        raise ApiError("payload_too_large", "Archive trop volumineuse pour l’import.", 413)
+                    handle.write(chunk)
+            return tmp
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def import_passphrase(request: Request) -> str | None:
+        if "passphrase" in request.query_params:
+            raise ApiError("bad_request", "Transmets la phrase secrète dans le corps JSON ou l’en-tête X-OSIA-Archive-Passphrase-B64, jamais dans l’URL.", 400)
+        value = request.headers.get("x-osia-archive-passphrase-b64")
+        if not value:
+            return None
+        try:
+            if len(value) > 16_384:
+                raise ValueError
+            return base64.b64decode(value, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            raise ApiError("bad_request", "Phrase secrète d’archive invalide.", 400) from None
+
     @app.post("/api/v1/import/preview")
     async def import_preview(request: Request):
         """Prévisualisation d'une archive .osia (T7.6) : JSON {path, passphrase} ou upload
         binaire (application/octet-stream). Aucune modification locale."""
         await require_auth(request)
-        raw = await request.body()
         ct = request.headers.get("content-type", "")
-        if ct.startswith("application/json") and raw:
-            body = ImportPreviewRequest(**json.loads(raw))
+        if ct.startswith("application/json"):
+            body = await import_json(request, ImportPreviewRequest)
             return await engine.exchange.preview_import(pathlib.Path(body.path), body.passphrase)
-        tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
-        tmp.write_bytes(raw)
+        passphrase = import_passphrase(request)
+        tmp = await import_upload(request)
         try:
-            return await engine.exchange.preview_import(tmp)
+            return await engine.exchange.preview_import(tmp, passphrase)
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -632,31 +713,24 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         """Application supervisée d'un import (T7.6, D5.7.2) : transaction unique, conflits
         explicites, aucune reprise de recherche ni appel IA. Accepte un corps JSON {path, mode,
         on_conflict, passphrase} ou un upload binaire application/octet-stream (client web ;
-        mode/on_conflict/passphrase en query params)."""
+        mode/on_conflict en query params et phrase secrète dans un en-tête dédié)."""
         await require_auth(request)
         ct = request.headers.get("content-type", "")
         if ct.startswith("application/octet-stream"):
-            raw = await request.body()
-            tmp = engine.settings.paths.incoming_dir / f"upload_{new_id('up')}.osia"
-            tmp.write_bytes(raw)
+            passphrase = import_passphrase(request)
+            tmp = await import_upload(request)
             try:
                 result = await engine.exchange.apply_import(
                     tmp,
                     mode=request.query_params.get("mode", "add"),
                     on_conflict=request.query_params.get("on_conflict", "fail"),
-                    passphrase=request.query_params.get("passphrase") or None,
+                    passphrase=passphrase,
                 )
             finally:
                 tmp.unlink(missing_ok=True)
             _audit_op("op.import.apply", request, {"mode": request.query_params.get("mode", "add"), "upload": True})
             return result
-        raw = await request.body()
-        if not raw:
-            raise ApiError("bad_request", "corps JSON ou upload binaire requis", 400)
-        try:
-            body = ImportApplyRequest(**json.loads(raw))
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
-            raise ApiError("bad_request", f"corps JSON invalide : {exc}", 400) from exc
+        body = await import_json(request, ImportApplyRequest)
         result = await engine.exchange.apply_import(
             pathlib.Path(body.path), mode=body.mode, on_conflict=body.on_conflict, passphrase=body.passphrase
         )
@@ -745,12 +819,13 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
             raise ApiError("not_found", "connecteur inconnu", 404)
         if body.enabled and manifest["trust_level"] == "experimental" and not body.confirm:
             raise ApiError("confirmation_requise", "connecteur expérimental : confirm=true exigé (T5.1)", 400)
-        engine.registry.set_enabled(connector_id, body.enabled)
         if body.enabled and manifest["trust_level"] == "experimental":
             await engine.repo.set_setting(f"allow_experimental:{connector_id}", True)
             engine.policy.allow_target(connector_id)
         elif not body.enabled:
             await engine.repo.set_setting(f"allow_experimental:{connector_id}", False)
+        await engine.repo.set_setting(f"connector_enabled:{connector_id}", body.enabled)
+        engine.registry.set_enabled(connector_id, body.enabled)
         _audit_op("op.connector.toggle", request, {"connector_id": connector_id, "enabled": body.enabled, "trust_level": manifest["trust_level"]})
         return {"id": connector_id, "enabled": body.enabled}
 
@@ -814,7 +889,46 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         return {
             "providers": providers,
             "fallback_local_to_cloud_authorized": bool(engine.broker.allowed_fallbacks.get("local")),
+            **engine.ai_connections.view(),
         }
+
+    async def read_connection(request: Request, model: type[ConnectionBody]) -> ConnectionBody:
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise ApiError("invalid_provider_configuration", "Envoie la configuration au format JSON.", 415)
+        # Les erreurs de validation de FastAPI peuvent inclure la valeur reçue.
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 16_384:
+                raise ApiError("invalid_provider_configuration", "Configuration trop volumineuse.", 413)
+            raw.extend(chunk)
+        try:
+            return model.model_validate_json(raw)
+        except ValidationError:
+            raise ApiError("invalid_provider_configuration", "Vérifie le modèle, l’adresse API, la clé et les tarifs.", 422) from None
+
+    @app.put("/api/v1/ai/providers/{provider_key}")
+    async def ai_configure(provider_key: ProviderKey, request: Request) -> dict:
+        """Enregistre les métadonnées du fournisseur et garde la clé saisie en mémoire."""
+        await require_auth(request)
+        body = await read_connection(request, ConnectionUpdate)
+        await engine.ai_connections.configure(provider_key, body)
+        _audit_op("op.ai.configure", request, {"provider_key": provider_key})
+        return engine.ai_connections.view()
+
+    @app.put("/api/v1/ai/selection/{provider_key}")
+    async def ai_select(provider_key: Literal["simulated", "local", "mistral", "compatible"], request: Request) -> dict:
+        await require_auth(request)
+        await engine.ai_connections.select(provider_key)
+        _audit_op("op.ai.select", request, {"provider_key": provider_key})
+        return engine.ai_connections.view()
+
+    @app.post("/api/v1/ai/providers/{provider_key}/test")
+    async def ai_test_connection(provider_key: ProviderKey, request: Request) -> dict:
+        """Liste les modèles avec les champs saisis, sans les enregistrer ni envoyer de prompt."""
+        await require_auth(request)
+        body = await read_connection(request, ConnectionCredentials)
+        adapter = engine.ai_connections.test_adapter(provider_key, body)
+        return await ping_provider(adapter, provider_key, request)
 
     @app.post("/api/v1/ai/fallback")
     async def ai_fallback(request: Request, body: AIFallbackRequest) -> dict:
@@ -822,11 +936,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         (autorisation de transmission persistée). Sans cette autorisation, aucun repli n'est
         possible ; avec, le repli payant reste soumis à la réservation budgétaire (T8.4)."""
         await require_auth(request)
-        await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", body.enabled)
-        if body.enabled and "local" in engine.broker.adapters and "mistral" in engine.broker.adapters:
-            engine.broker.allowed_fallbacks["local"] = "mistral"
-        else:
-            engine.broker.allowed_fallbacks.pop("local", None)
+        async with engine.ai_connections.lock:
+            await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", body.enabled)
+            engine.ai_connections.refresh_fallback(body.enabled)
         _audit_op("op.ai.fallback.toggle", request, {"enabled": body.enabled})
         return {"allow_ai_fallback_local_to_cloud": body.enabled, "fallbacks": dict(engine.broker.allowed_fallbacks)}
 
@@ -838,12 +950,23 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         adapter = engine.broker.adapters.get(body.provider_key)
         if adapter is None:
             raise ApiError("not_found", "fournisseur inconnu", 404)
+        return await ping_provider(adapter, body.provider_key, request)
+
+    async def ping_provider(adapter: AIAdapter, provider_key: str, request: Request) -> dict:
         try:
             result = await adapter.ping()
         except Exception as exc:
-            engine.audit.log("op.ai.test", "failure", detail={"provider_key": body.provider_key}, client=_client(request))
-            raise ApiError("ai_test_failed", f"test de connexion échoué : {exc}", 502) from exc
-        _audit_op("op.ai.test", request, {"provider_key": body.provider_key, "ok": True})
+            engine.audit.log("op.ai.test", "failure", detail={"provider_key": provider_key}, client=_client(request))
+            if isinstance(exc, AIAdapterError) and exc.status in (401, 403):
+                message = "Accès refusé par le fournisseur. Vérifie la clé API et ses autorisations."
+            elif isinstance(exc, NetworkDeny):
+                message = "Adresse bloquée par la politique réseau OSIA. Vérifie le domaine et l’adresse de base."
+            elif isinstance(exc, AIAdapterError) and exc.status is not None and exc.status != 200:
+                message = f"Le fournisseur a répondu HTTP {exc.status}. Vérifie l’adresse de base et l’accès à /models."
+            else:
+                message = "Connexion impossible. Vérifie l’adresse de base et la disponibilité du service."
+            raise ApiError("ai_test_failed", message, 502) from None
+        _audit_op("op.ai.test", request, {"provider_key": provider_key, "ok": True})
         return result
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()

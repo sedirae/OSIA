@@ -23,6 +23,9 @@
 - `GET /api/v1/ai/providers` : fournisseurs enregistrés, modèles par rôle, replis autorisés, `paid`/coût — **aucune clé API exposée** (testé).
 - `POST /api/v1/ai/fallback` `{enabled}` : autorisation persistée du repli local→cloud (T8.8/T8.9).
 - `POST /api/v1/ai/test` `{provider_key}` : test de connexion explicite non facturé.
+- `POST /api/v1/ai/providers/{provider_key}/test` `{base_url?, api_key?}` : liste les modèles à partir du formulaire, sans enregistrer les champs ni envoyer de prompt.
+- `PUT /api/v1/ai/providers/{provider_key}` `{model, base_url?, api_key?, input_cents_per_mtok?, output_cents_per_mtok?}` : configuration Mistral, locale ou cloud compatible OpenAI. La clé est conservée en mémoire du service, liée à l’adresse de base. PostgreSQL ne conserve que les métadonnées. Le test et les appels cloud utilisent HTTPS, des IP publiques validées et épinglées, sans redirection.
+- `PUT /api/v1/ai/selection/{provider_key}` : choix explicite du fournisseur pour les trois rôles. La sélection est conservée au redémarrage. Si la clé manque, les nouveaux lancements et reprises sont bloqués jusqu’à sa saisie ou au choix d’un autre fournisseur. La sélection n’active pas les dépenses.
 - CLI : `osia ai providers|test <key>|fallback --enable/--disable`.
 
 ## 4. Limites connues

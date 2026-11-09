@@ -10,7 +10,7 @@ from conftest import make_investigation
 
 async def client_for(engine):
     app = create_app(engine)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 async def _seed(engine, inv_id):

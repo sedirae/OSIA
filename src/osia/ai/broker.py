@@ -60,14 +60,16 @@ class AIBroker:
         depth: int = 0,
     ) -> T:
         adapter_key = self.role_models.get(role, next(iter(self.adapters)))
-        adapter = self.adapters[adapter_key]
+        adapter = self.adapters.get(adapter_key)
+        if adapter is None:
+            raise PolicyDeny("fournisseur_ia_indisponible: renseigner la clé du fournisseur actif", "ai")
         try:
             return await self._call_adapter(adapter, role, prompt, input_data, response_model, investigation_id, branch_id, task_id, depth)
         except Exception as exc:
             fallback_key = self.allowed_fallbacks.get(adapter_key)
-            if fallback_key is None or fallback_key == adapter_key:
+            fallback = self.adapters.get(fallback_key) if fallback_key != adapter_key else None
+            if fallback is None:
                 raise
-            fallback = self.adapters[fallback_key]
             await self.bus.emit(
                 type="ai.fallback",
                 investigation_id=investigation_id,

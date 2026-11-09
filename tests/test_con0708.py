@@ -376,7 +376,7 @@ def _install_fake_fetch(engine):
 async def test_api_health_routes(engine):
     _install_fake_fetch(engine)
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/connectors")
         assert r.status_code == 200
         ids = {e["id"] for e in r.json()}

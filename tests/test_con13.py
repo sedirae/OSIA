@@ -178,7 +178,7 @@ async def test_budget_warnings_approche_plafond(engine):
 
 async def test_api_settings_get_put(engine):
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/settings")
         assert r.status_code == 200
         s = r.json()["settings"]
@@ -214,7 +214,7 @@ async def test_api_settings_get_put(engine):
 
 async def test_api_profiles_create_et_validation(engine):
     app = create_app(engine)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1") as client:
         r = await client.get("/api/v1/profiles")
         ids = {p["id"] for p in r.json()}
         assert {"rapide", "standard", "approfondi"} <= ids  # V1.4

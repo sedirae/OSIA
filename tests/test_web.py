@@ -12,7 +12,7 @@ from conftest import make_investigation
 
 async def client_for(engine):
     app = create_app(engine)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 async def test_web_serves_index_and_assets(engine):
@@ -141,10 +141,8 @@ async def test_import_apply_accepts_binary_upload(engine):
 
 
 async def test_web_settings_view_wired_to_existing_api(engine):
-    """Décision porteur du 09/11/2026 : écran « Paramètres » web adossé aux API existantes
-    (fournisseurs IA, test de connexion non facturé, repli local→cloud, paramètres globaux,
-    profils, connecteurs, noms de secrets). Aucune saisie ni lecture de VALEUR de secret côté
-    navigateur : app.js ne doit appeler que GET /api/v1/secrets, jamais PUT/DELETE (D2 §4.3 / T5.5)."""
+    """La page de paramètres est servie avec le formulaire IA et les autres réglages.
+    La saisie des clés passe par l'API fournisseur dédiée, qui n'expose pas leurs valeurs."""
     async with await client_for(engine) as client:
         r = await client.get("/")
         assert r.status_code == 200
@@ -155,7 +153,8 @@ async def test_web_settings_view_wired_to_existing_api(engine):
             "renderSettings",
             "'/parametres'",
             "/api/v1/ai/providers",
-            "/api/v1/ai/test",
+            "/api/v1/ai/providers/",
+            "/api/v1/ai/selection/",
             "/api/v1/ai/fallback",
             "/api/v1/settings",
             "/api/v1/profiles",
@@ -173,14 +172,12 @@ async def test_web_settings_view_wired_to_existing_api(engine):
 
 
 def test_app_js_smoke_node():
-    """app.js se charge sans exception avec un DOM simulé et rend la vue d'accueil."""
+    """Vérifie l'accueil et le parcours du formulaire IA avec un DOM et une API simulés."""
     if shutil.which("node") is None:
         return
     app_js = pathlib.Path(__file__).parent.parent / "src" / "osia" / "web" / "app.js"
-    p = subprocess.run(
-        ["node", str(pathlib.Path(__file__).parent / "js_smoke_app.js"), str(app_js)],
-        capture_output=True,
-        text=True,
-    )
-    assert "SCRIPT OK" in p.stdout, p.stdout + p.stderr
-    assert "Nouvelle investigation" in p.stdout
+    script = ["node", str(pathlib.Path(__file__).parent / "js_smoke_app.js"), str(app_js)]
+    for args, expected in (([], "Nouvelle investigation"), (["--settings"], "Mistral API · model-from-catalogue")):
+        p = subprocess.run(script + args, capture_output=True, text=True)
+        assert p.returncode == 0 and "SCRIPT OK" in p.stdout, p.stdout + p.stderr
+        assert expected in p.stdout

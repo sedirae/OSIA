@@ -7,6 +7,7 @@ import json
 import pathlib
 import re
 import zipfile
+import zlib
 from typing import Any, Optional
 
 from .crypto import CIPHER, ArchiveCrypto, CryptoError
@@ -83,8 +84,11 @@ def _validate_zip_layout(zf: zipfile.ZipFile) -> None:
 def _bounded_read(zf: zipfile.ZipFile, name: str, max_bytes: int) -> bytes:
     """Lecture bornée d'une entrée ZIP : au plus max_bytes+1 octets lus (la taille déclarée peut
     mentir, ex. zip bomb), puis rejet si le plafond est dépassé."""
-    with zf.open(name) as fh:
-        data = fh.read(max_bytes + 1)
+    try:
+        with zf.open(name) as fh:
+            data = fh.read(max_bytes + 1)
+    except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError) as exc:
+        raise ArchiveError("entrée ZIP corrompue ou compression non prise en charge") from exc
     if len(data) > max_bytes:
         raise ArchiveError(f"entrée dépassant le plafond décompressé ({max_bytes} o): {name!r}")
     return data
@@ -217,12 +221,14 @@ def _read_zip(src: pathlib.Path | bytes | io.BufferedIOBase) -> zipfile.ZipFile:
         return zipfile.ZipFile(src, "r")
     except zipfile.BadZipFile as exc:
         raise ArchiveError("fichier non reconnu comme archive ZIP (.osia attendu)") from exc
+    except OSError as exc:
+        raise ArchiveError("archive introuvable ou inaccessible") from exc
 
 
 def _load_json(raw: bytes, what: str) -> dict:
     try:
         obj = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
         raise ArchiveError(f"contenu illisible ({what})") from exc
     if not isinstance(obj, dict):
         raise ArchiveError(f"contenu invalide ({what})")
@@ -235,8 +241,16 @@ def read_and_verify(src, passphrase: Optional[str] = None) -> tuple[dict, dict, 
     Retourne aussi `raw` : nom d'entrée ZIP -> contenu brut lu UNE SEULE FOIS pendant la
     vérification (réserve audit PR#18 : évite la double lecture de chaque entrée par
     `extract_payload` via `preloaded=raw`)."""
-    crypto = ArchiveCrypto(passphrase)
     zf = _read_zip(src)
+    try:
+        return _verify_archive(zf, passphrase)
+    except BaseException:
+        zf.close()
+        raise
+
+
+def _verify_archive(zf: zipfile.ZipFile, passphrase: Optional[str]):
+    crypto = ArchiveCrypto(passphrase)
     _validate_zip_layout(zf)
     names = set(zf.namelist())
     if MANIFEST in names and META not in names:
@@ -290,13 +304,21 @@ def _verify_files(zf: zipfile.ZipFile, files: list[dict[str, Any]], *, encrypted
     names = set(zf.namelist())
     total = 0
     raw_map: dict[str, bytes] = {}
+    paths: set[str] = set()
+    if len(files) > MAX_ZIP_ENTRIES:
+        raise ArchiveError("manifeste trop volumineux")
     for entry in files:
+        if not isinstance(entry, dict):
+            raise ArchiveError("manifeste invalide : chaque entrée files doit être un objet")
         path = entry.get("path")
         try:
             _validate_manifest_path(path)
         except ArchiveError as exc:
             errors.append(str(exc))
             continue
+        if path in paths:
+            raise ArchiveError("chemin dupliqué dans le manifeste")
+        paths.add(path)
         if not is_valid_sha256(entry.get("sha256")):
             errors.append(f"empreinte invalide (64 hex attendus): {path}")
             continue
@@ -352,6 +374,8 @@ def extract_payload(zf: zipfile.ZipFile, manifest: dict, *, encrypted: bool, key
     proofs: dict[str, bytes] = {}
     total = 0
     for entry in manifest["files"]:
+        if not isinstance(entry, dict):
+            raise ArchiveError("manifeste invalide : chaque entrée files doit être un objet")
         path = entry.get("path")
         _validate_manifest_path(path)  # lève ArchiveError si absent/non sûr (jamais KeyError)
         target = entry.get("enc") if encrypted else path
@@ -393,7 +417,11 @@ def extract_payload(zf: zipfile.ZipFile, manifest: dict, *, encrypted: bool, key
             rows = [json.loads(line) for line in text.splitlines() if line.strip()] if text else []
             if path.endswith(".json"):
                 rows = [json.loads(text)] if text else []
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ArchiveError(f"contenu illisible: {path} ({exc})") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+            raise ArchiveError(f"contenu illisible: {path}") from exc
+        if not all(isinstance(row, dict) for row in rows):
+            raise ArchiveError(f"lignes de données invalides: {path}")
+        if table in payload:
+            raise ArchiveError(f"table dupliquée: {table}")
         payload[table] = rows
     return payload, proofs

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Awaitable, Callable, Optional, Type, TypeVar
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ DEFAULT_MISTRAL_MODEL = "mistral-small-2603"  # V1.3 : Mistral Small 4
 DEFAULT_LOCAL_MODEL = "ministral-3-8b"  # V1.3 : premier candidat local à qualifier
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1"  # endpoint OpenAI-compatible local (Ollama…)
 DEFAULT_MISTRAL_API_BASE = "https://api.mistral.ai/v1"
+MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,159}$"
 
 # Contrat d'un fetch POST injecté (tests hors ligne) : (url, payload, headers) -> (status, headers, body).
 PostFetchFn = Callable[[str, Optional[dict], dict], Awaitable[tuple[int, dict, bytes]]]
@@ -176,11 +178,17 @@ class ChatCompletionsAdapter(AIAdapter):
         """Coût constaté depuis l'usage réel (T8.5, F03) ; None si l'usage ou les tarifs sont
         absents (à réconcilier — le forfait cost_per_call_cents n'est JAMAIS présenté comme
         montant constaté)."""
-        if usage is None or self.input_cents_per_mtok is None or self.output_cents_per_mtok is None:
+        if not isinstance(usage, dict) or self.input_cents_per_mtok is None or self.output_cents_per_mtok is None:
             return None
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        return -(-(prompt_tokens * self.input_cents_per_mtok + completion_tokens * self.output_cents_per_mtok) // 1_000_000)
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        # Un compteur manquant/invalide ne prouve jamais un coût nul. La réservation
+        # reste bloquée pour réconciliation au lieu de sous-compter ou lever en plein bilan.
+        if any(type(value) is not int or not 0 <= value <= 1_000_000_000
+               for value in (prompt_tokens, completion_tokens)):
+            return None
+        amount = -(-(prompt_tokens * self.input_cents_per_mtok + completion_tokens * self.output_cents_per_mtok) // 1_000_000)
+        return amount if 0 <= amount <= 2_147_483_647 else None
 
     async def complete(self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]) -> T:
         output, _usage = await self.complete_with_usage(role, prompt, input_data, response_model)
@@ -189,6 +197,7 @@ class ChatCompletionsAdapter(AIAdapter):
     async def complete_with_usage(
         self, role: str, prompt: str, input_data: dict[str, Any], response_model: Type[T]
     ) -> tuple[T, Optional[dict[str, Any]]]:
+        self.last_usage = None
         payload = self._payload(prompt, input_data)
         status, _, body = await self._post(self.completions_url, payload)
         if status != 200:
@@ -217,8 +226,17 @@ class ChatCompletionsAdapter(AIAdapter):
         try:
             data = json.loads(body.decode("utf-8"))
             raw = data.get("data", data.get("models", []))
-            models = [m.get("id") for m in raw if isinstance(m, dict) and m.get("id")]
-        except (json.JSONDecodeError, AttributeError, UnicodeDecodeError) as exc:
+            if not isinstance(raw, list):
+                raise TypeError
+            models = []
+            for entry in raw:
+                model_id = entry.get("id") if isinstance(entry, dict) else None
+                if (isinstance(model_id, str) and re.fullmatch(MODEL_PATTERN, model_id)
+                        and (not self.api_key or self.api_key not in model_id)):
+                    models.append(model_id)
+                    if len(models) == 500:
+                        break
+        except (json.JSONDecodeError, AttributeError, TypeError, UnicodeDecodeError) as exc:
             raise AIAdapterError(f"fournisseur {self.provider} : liste des modèles illisible", status=status) from exc
         return {"ok": True, "provider": self.provider, "model": self.model, "paid": self.paid, "models": models}
 

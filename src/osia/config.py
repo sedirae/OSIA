@@ -227,6 +227,12 @@ class Settings:
         - mode desktop : écoute locale uniquement (127.0.0.1/localhost/::1) ;
         - mode serveur exposé (host non local) : HTTPS obligatoire (certificats fournis ou autogénérés).
         """
+        if self.mode not in ("desktop", "server"):
+            raise ConfigError("OSIA_MODE doit être desktop ou server.")
+        if not 1 <= self.listen_port <= 65535:
+            raise ConfigError("OSIA_LISTEN_PORT doit être compris entre 1 et 65535.")
+        if bool(self.tls_certfile) != bool(self.tls_keyfile):
+            raise ConfigError("Fournir ensemble OSIA_TLS_CERTFILE et OSIA_TLS_KEYFILE.")
         if self.mode == "desktop" and not is_local_host(self.listen_host):
             raise ConfigError(
                 "mode desktop : écoute locale uniquement (OSIA_LISTEN_HOST=127.0.0.1) — "

@@ -10,7 +10,7 @@ from conftest import make_investigation
 
 async def client_for(engine):
     app = create_app(engine)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 async def test_api_investigation_crud_and_idempotency(engine):
@@ -76,7 +76,7 @@ async def test_sse_replay_with_cursor(engine):
         await asyncio.sleep(0.05)
     try:
         collected = ""
-        async with AsyncClient(base_url="http://127.0.0.1:18471", timeout=10) as client:
+        async with AsyncClient(base_url="http://127.0.0.1:18471", timeout=10, trust_env=False) as client:
             async with client.stream(
                 "GET", f"/api/v1/investigations/{inv['id']}/events", headers={"Accept": "text/event-stream"}
             ) as r:

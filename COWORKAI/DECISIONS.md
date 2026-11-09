@@ -216,3 +216,9 @@ Lors de l'installation (09/11/2026), le porteur a réaffirmé une exigence expri
 - **Livré** : vue `#/parametres` (`src/osia/web/`) adossée aux API existantes — fournisseurs IA (liste `GET /api/v1/ai/providers`, test de connexion non facturé `POST /api/v1/ai/test`, autorisation de repli local→cloud `POST /api/v1/ai/fallback`), paramètres globaux (`GET/PUT /api/v1/settings`), profils (`GET/POST /api/v1/profiles`), connecteurs (`GET /api/v1/connectors`, `POST .../toggle` avec confirmation explicite pour un connecteur expérimental, T5.1), noms des secrets (`GET /api/v1/secrets`).
 - **Contrainte conservée** : aucune clé ou valeur de secret n'est saisie, affichée ou transmise par le navigateur (D2 §4.3, T5.5, OSIA-I-12) — le coffre reste géré en CLI (`osia secrets list|set|delete`).
 - **Vérification** : `tests/test_web.py::test_web_settings_view_wired_to_existing_api` + tests API existants (`test_con06.py`, `test_con11.py`, `test_con13.py`) + smoke Node `test_app_js_smoke_node`.
+
+### Complément demandé par le porteur — configuration des connexions IA
+
+La restriction de saisie ci-dessus est levée pour les **clés de fournisseurs IA**. Le formulaire transmet la clé masquée au backend OSIA pour la connexion ou le test explicite. Le backend ne renvoie jamais sa valeur, ne la stocke pas dans le navigateur ou la base et la conserve en mémoire du service. Le coffre CLI reste disponible séparément.
+
+Le parcours couvre Mistral, une API locale et une API cloud compatible OpenAI. La sélection explicite affecte un modèle aux rôles existants de planification, extraction et synthèse. Les autorisations de dépense, plafonds et règles de repli du courtier continuent de s’appliquer (D2, T5.5, T8.4, T8.8 et T8.9).

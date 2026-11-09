@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from .ai import AIBroker, ChatCompletionsAdapter, build_ai_adapters
+from .ai.connections import AIConnections, CONFIG_SETTING, ConnectionsState
 from .backup import BackupService
-from .config import Settings
+from .config import ConfigError, Settings
 from .connectors import ConnectorHealthChecker, ConnectorRegistry, SimulatedConnector
 from .connectors.real import build_real_connectors
 from .events import EventBus
@@ -39,6 +41,7 @@ class Engine:
         self.policy: PolicyEngine
         self.registry: ConnectorRegistry
         self.broker: AIBroker
+        self.ai_connections: AIConnections
         self.filestore: FileStore
         self.graph: GraphService
         self.report: ReportService
@@ -60,6 +63,13 @@ class Engine:
     async def setup(self) -> None:
         self.settings.paths.ensure()
         self.pool = await create_pool(self.settings.db_dsn)
+        try:
+            await self._setup_components()
+        except BaseException:
+            await self.pool.close()
+            raise
+
+    async def _setup_components(self) -> None:
         await migrate(self.pool)
         self.repo = Repo(self.pool)
         await self.repo.set_setting("paid_calls_enabled", await self.repo.get_setting("paid_calls_enabled", False))
@@ -84,19 +94,26 @@ class Engine:
         self.policy = PolicyEngine(self.pool, self.budgets)
         self.filestore = FileStore(self.pool, self.settings.paths)
         self.external_semaphore = asyncio.Semaphore(2)
-        self.audit = SecurityAudit(self.settings.paths.log_dir, retention_days=self.settings.audit_retention_days)
+        self.audit = SecurityAudit(
+            self.settings.paths.log_dir,
+            retention_days=await self.repo.get_setting("audit_retention_days", self.settings.audit_retention_days),
+        )
         self.techlog = TechLog(
             self.settings.paths.log_dir,
             retention_days=await self.repo.get_setting("tech_log_retention_days", self.settings.tech_log_retention_days),
         )
-        self.sessions = SessionManager(self.pool, ttl_hours=self.settings.session_ttl_hours)
+        self.sessions = SessionManager(
+            self.pool, ttl_hours=await self.repo.get_setting("session_ttl_hours", self.settings.session_ttl_hours),
+        )
         self.secrets = SecretStore(self.settings.paths.config_dir, persist=self.settings.secrets_persist)
         connector = SimulatedConnector()
         self.registry.register(connector)
         self.policy.allow_target(connector.manifest.id)
         # CON-11 (V1.3) : adaptateurs IA réels selon la configuration ; CON-07/CON-08 : connecteurs
         # réels V1.2. Leurs domaines alimentent l'allowlist du NetworkGuard AVANT sa création.
-        ai_adapters, role_models, ai_domains = build_ai_adapters(self.settings, self.secrets)
+        ai_state = ConnectionsState.model_validate(await self.repo.get_setting(CONFIG_SETTING, {}))
+        ai_settings = replace(self.settings, ai_provider_explicit=False) if ai_state.selected is not None else self.settings
+        ai_adapters, role_models, ai_domains = build_ai_adapters(ai_settings, self.secrets)
         real_connectors = build_real_connectors()
         allowed_domains = set(self.settings.net_allow_domains)
         for entry in self.registry.list():
@@ -116,25 +133,23 @@ class Engine:
             c.netguard = self.netguard
             self.registry.register(c)
             self.policy.allow_target(c.manifest.id)
+        for entry in self.registry.list():
+            enabled = await self.repo.get_setting(f"connector_enabled:{entry['id']}", entry["enabled"])
+            self.registry.set_enabled(entry["id"], enabled is True)
         for ad in ai_adapters.values():
             if isinstance(ad, ChatCompletionsAdapter) and not getattr(ad, "is_local", False):
                 ad.netguard = self.netguard  # host externe (ex. api.mistral.ai) : guard T5.4
             self.policy.allow_target(f"{ad.provider}:{ad.model}")
-        # Repli local -> cloud (T8.9, V1.3, D2 §4.4) : UNIQUEMENT si autorisation de transmission
-        # persistée ; le repli payant passe en outre par la réservation budgétaire (T8.4).
-        fallback_allowed = await self.repo.get_setting("allow_ai_fallback_local_to_cloud", False)
-        allowed_fallbacks = {}
-        if fallback_allowed and "local" in ai_adapters and "mistral" in ai_adapters:
-            allowed_fallbacks = {"local": "mistral"}
         self.broker = AIBroker(
             self.policy,
             self.bus,
             ai_adapters,
             role_models=role_models,
-            allowed_fallbacks=allowed_fallbacks,
             semaphore=self.external_semaphore,
             techlog=self.techlog,
         )
+        self.ai_connections = AIConnections(self.settings, self.repo, self.broker, self.netguard)
+        await self.ai_connections.restore(ai_state)
         self.health = ConnectorHealthChecker(self.registry)
         self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
         self.report = ReportService(self.pool, self.repo, graph=self.graph)
@@ -145,23 +160,47 @@ class Engine:
         self.techlog.log("engine", "engine.setup", detail={"mode": self.settings.mode})
 
     async def start(self) -> dict:
-        recovery = await self.scheduler.recover()
-        self._runner = asyncio.create_task(self.scheduler.run_forever())
+        # Un deuxième serveur/CLI ne doit jamais récupérer les tâches du moteur vivant.
+        if self._runner is not None and not self._runner.done():
+            raise ConfigError("Un moteur OSIA est déjà actif sur cette base.")
+        connection = await self.pool.acquire()
+        locked = False
+        try:
+            locked = await connection.fetchval("SELECT pg_try_advisory_lock(hashtext('osia:scheduler'))")
+            if not locked:
+                raise ConfigError("Un moteur OSIA est déjà actif sur cette base. Utilise le service existant.")
+            recovery = await self.scheduler.recover()
+        except BaseException:
+            if locked:
+                await connection.execute("SELECT pg_advisory_unlock(hashtext('osia:scheduler'))")
+            await self.pool.release(connection)
+            raise
+
+        async def run_exclusively():
+            try:
+                await self.scheduler.run_forever()
+            finally:
+                # Libéré aussi si l'ordonnanceur échoue ou est arrêté directement.
+                try:
+                    await connection.execute("SELECT pg_advisory_unlock(hashtext('osia:scheduler'))")
+                finally:
+                    await self.pool.release(connection)
+
+        self.scheduler.reset_stop()
+        self._runner = asyncio.create_task(run_exclusively())
         self.techlog.log("engine", "engine.start", detail={"recovered_tasks": recovery.get("recovered") if isinstance(recovery, dict) else None})
         return recovery
 
     async def stop(self) -> None:
         self.scheduler.stop()
-        if self._runner:
-            await self._runner
-        if self._version_check_task:
-            try:
-                await self._version_check_task
-            except Exception:
-                pass  # best-effort : le check de version ne doit jamais empêcher l'arrêt
-        if self.pool:
-            await self.pool.close()
-        # Audit PR#24 P3-c : fermer les sessions HTTP poolées à l'arrêt (évite les
-        # warnings aiohttp de session non fermée).
-        await close_default_session_pool()
-        self.techlog.log("engine", "engine.stop")
+        try:
+            if self._runner:
+                await self._runner
+        finally:
+            if self._version_check_task:
+                self._version_check_task.cancel()
+                await asyncio.gather(self._version_check_task, return_exceptions=True)
+            if self.pool:
+                await self.pool.close()
+            await close_default_session_pool()
+            self.techlog.log("engine", "engine.stop")

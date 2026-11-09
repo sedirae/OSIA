@@ -13,7 +13,7 @@ from osia.security import SecretStore, run_isolated, IsolationLimits
 
 async def client_for(engine):
     app = create_app(engine)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 def guard(**kw) -> NetworkGuard:

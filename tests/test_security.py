@@ -13,7 +13,7 @@ from osia.security import ensure_self_signed_cert, ensure_server_credentials
 
 async def client_for(engine):
     app = create_app(engine)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
 
 
 def server_engine(engine, token: bytes = b"secret"):

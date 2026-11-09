@@ -218,7 +218,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
     # CON-13 / B-ACC-06 : requête équivalente déjà satisfaite -> réutilisation du cache valide
     # (V1.4 : TTL 24 h par défaut, D4 §6.2 fraîcheur tracée) plutôt qu'un nouvel appel externe.
     ttl_hours = await engine.repo.get_setting("source_cache_ttl_hours", 24)
-    cached = await engine.repo.cache_get(connector.manifest.id, payload["query"])
+    cached = await engine.repo.cache_get(connector.manifest.id, payload["query"], params=payload.get("params"))
     if cached is not None:
         # F09 : un hit cache suit le MÊME traitement métier qu'une collecte (preuve rattachée,
         # extraction, synthèse) — il évite seulement l'appel externe redondant. La date et la
@@ -355,6 +355,7 @@ async def handle_source_query(task: asyncpg.Record, ctx: TaskContext) -> dict[st
             "raw_b64": base64.b64encode(result.raw_bytes).decode("ascii") if result.raw_bytes is not None else None,
         },
         ttl_hours,
+        params=payload.get("params"),
     )
     await engine.policy.complete_op(decision.op_id, {"http_status": result.provenance.http_status})
     engine.techlog.log("tasks", "source.query", investigation_id=inv["id"], branch_id=task["branch_id"], task_id=task["id"], op_id=decision.op_id, duration_ms=int((time.monotonic() - started) * 1000), detail={"connector_id": connector.manifest.id, "http_status": result.provenance.http_status})
@@ -426,8 +427,9 @@ async def _build_synthesis_input(engine: "Engine", inv: asyncpg.Record, task: as
         for d in (await engine.graph.list_decisions(inv["id"], limit=SYNTHESIS_MAX_DECISIONS))[:SYNTHESIS_MAX_DECISIONS]
     ]
     contradictions_ctx = [a for a in assertions_ctx if a["support_level"] == "contradictoire" or a["contradicted_by"]]
+    branch = await engine.repo.get_branch(task["branch_id"]) if task["branch_id"] else None
     input_data = {
-        "objective": inv["objective"],
+        "objective": (branch["objective"] if branch else None) or inv["objective"] or inv["title"],
         "depth": task["depth"],
         "branch_id": task["branch_id"],
         "proofs": proofs_ctx,

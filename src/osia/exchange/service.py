@@ -24,7 +24,7 @@ from .archive import (
     write_archive,
 )
 from .crypto import CryptoError
-from .dump import EXCLUDABLE, ImportConflictError, dump_investigation, import_payload, detect_conflicts
+from .dump import EXCLUDABLE, ImportConflictError, dump_investigation, import_payload, detect_conflicts, validate_payload
 
 OSIA_VERSION = "0.1.0"
 
@@ -225,6 +225,7 @@ class ExchangeService:
             payload, proofs = extract_payload(zf, manifest, encrypted=encrypted, key=key, crypto=crypto, preloaded=raw)
         finally:
             zf.close()
+        validate_payload(payload)
         staged = self._stage_proof_files(proofs)
         for row in payload.get("proof_files", []):
             sha = row.get("sha256")
@@ -232,7 +233,10 @@ class ExchangeService:
                 # F01 : jamais de chemin fourni par l'archive en base — chemin canonique
                 # reconstruit depuis le digest (preuve sans binaire = chemin canonique aussi).
                 row["path"] = staged[sha]["path"] if sha in staged else _proof_relpath(sha)
-        report = await import_payload(self.pool, payload, mode=mode, on_conflict=on_conflict)
+        try:
+            report = await import_payload(self.pool, payload, mode=mode, on_conflict=on_conflict)
+        except (asyncpg.DataError, asyncpg.IntegrityConstraintViolationError, ValueError, TypeError) as exc:
+            raise ArchiveError("données d’archive incompatibles avec cette installation : vérifie les champs, profils et références") from exc
         inv_ids = [r["id"] for r in payload.get("investigations", [])]
         report["manifest_counts"] = manifest.get("counts")
         report["warnings"] = manifest.get("warnings", [])

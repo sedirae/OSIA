@@ -70,6 +70,7 @@ class NetworkPolicy:
     timeout_seconds: float = 15.0
     max_bytes: int = 10 * 1024 * 1024  # 10 Mo par réponse (V1.4 : 15 s / requête HTTP)
     min_interval_seconds: float = 1.0  # rate limit par domaine
+    public_only: bool = False
 
     def __post_init__(self) -> None:
         # P3-3 (audit PR#21) : les entrées d'allowlist/denylist doivent être des domaines
@@ -86,6 +87,10 @@ class NetworkPolicy:
         return True
 
     def ip_blocked(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if self.public_only and (not ip.is_global or ip.is_multicast):
+            return True
         return any(ip in net for net in self.blocked_networks)
 
 

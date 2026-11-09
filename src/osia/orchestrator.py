@@ -288,25 +288,24 @@ class Orchestrator:
 
     async def resume(self, investigation_id: str) -> asyncpg.Record:
         """Reprise : vérifie l'état, ne relance jamais aveuglément les opérations incertaines (D7.4, OSIA-I-09)."""
-        inv = await self.repo.get_investigation(investigation_id)
-        if inv is None:
-            raise PolicyDeny("investigation_inconnue", "reprise")
-        if inv["state"] != InvestigationState.SUSPENDED.value:
-            raise PolicyDeny(f"reprise_impossible:{inv['state']}", "reprise")
-        uncertain = int(
-            await self.pool.fetchval(
-                "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND state = 'uncertain'",
-                investigation_id,
-            )
-            or 0
-        )
-        if uncertain:
-            raise PolicyDeny(
-                f"reconciliation_requise:{uncertain} operation(s) incertaine(s) a reconcilier avant reprise",
-                "reprise",
-            )
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT * FROM investigations WHERE id = $1 FOR UPDATE", investigation_id
+                )
+                if inv is None:
+                    raise PolicyDeny("investigation_inconnue", "reprise")
+                if inv["state"] != InvestigationState.SUSPENDED.value:
+                    raise PolicyDeny(f"reprise_impossible:{inv['state']}", "reprise")
+                uncertain = await conn.fetchval(
+                    "SELECT COUNT(*) FROM external_ops WHERE investigation_id = $1 AND state = 'uncertain'",
+                    investigation_id,
+                )
+                if uncertain:
+                    raise PolicyDeny(
+                        f"reconciliation_requise:{uncertain} operation(s) incertaine(s) a reconcilier avant reprise",
+                        "reprise",
+                    )
                 inv = _norm_row(
                     await conn.fetchrow(
                         "UPDATE investigations SET state = 'running', stop_reason = NULL, updated_at = now() "
