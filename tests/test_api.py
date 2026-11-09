@@ -76,7 +76,7 @@ async def test_sse_replay_with_cursor(engine):
         await asyncio.sleep(0.05)
     try:
         collected = ""
-        async with AsyncClient(base_url="http://127.0.0.1:18471", timeout=10) as client:
+        async with AsyncClient(base_url="http://127.0.0.1:18471", timeout=10, trust_env=False) as client:
             async with client.stream(
                 "GET", f"/api/v1/investigations/{inv['id']}/events", headers={"Accept": "text/event-stream"}
             ) as r:

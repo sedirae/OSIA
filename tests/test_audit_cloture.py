@@ -10,6 +10,7 @@
 
 import hashlib
 import json
+import socket
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -17,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from osia.api import create_app
 from osia.cli import main as cli_main
 from osia.config import Settings
+from osia.netguard import NetworkGuard
 from osia.version import __version__, fetch_latest_version, is_newer
 
 
@@ -70,7 +72,12 @@ def test_exec03_web_ui_setting_from_env(monkeypatch):
 # ---------- EXEC-06 : notification de version ----------
 
 
-async def test_exec06_fetch_latest_version_parses_and_never_raises():
+async def test_exec06_fetch_latest_version_parses_and_never_raises(monkeypatch):
+    async def resolve(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+    monkeypatch.setattr(NetworkGuard, "_default_resolver", staticmethod(resolve))
+
     async def ok(url, ctx=None):
         return 200, {"content-type": "application/json"}, json.dumps({"info": {"version": "9.9.9"}}).encode()
 

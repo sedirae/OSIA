@@ -211,7 +211,7 @@ async def test_f15_sse_stream_replays_then_live_without_gap(engine):
             await asyncio.sleep(0.3)
             await engine.bus.emit(type="test.live", investigation_id=inv["id"], payload={"live": True})
 
-        async with AsyncClient(base_url="http://127.0.0.1:18472", timeout=10) as client:
+        async with AsyncClient(base_url="http://127.0.0.1:18472", timeout=10, trust_env=False) as client:
             task = asyncio.create_task(emit_live())
             async with client.stream(
                 "GET", f"/api/v1/investigations/{inv['id']}/events",

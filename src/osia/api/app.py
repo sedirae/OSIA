@@ -5,18 +5,21 @@ import hashlib
 import hmac
 import json
 import pathlib
-from typing import Any, Optional
+from typing import Any, Literal, Optional, TypeVar
 
 import asyncpg
 from fastapi import FastAPI, Header, Request
 from pydantic import ValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from ..ai import AIAdapter, AIAdapterError
+from ..ai.connections import ConnectionCredentials, ConnectionUpdate, ProviderKey
 from ..backup import BackupError
 from ..engine import Engine
 from ..exchange import ArchiveError, CryptoError, ImportConflictError
 from ..exchange.service import ExchangeService
 from ..ids import new_id
+from ..netguard import NetworkDeny
 from ..version import __version__, is_newer
 from ..models import (
     AIFallbackRequest,
@@ -44,6 +47,8 @@ from ..models import (
     EDITABLE_SETTINGS,
     validate_setting_value,
 )
+
+ConnectionBody = TypeVar("ConnectionBody", bound=ConnectionCredentials)
 
 
 def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
@@ -296,15 +301,17 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     ) -> JSONResponse:
         await require_auth(request)
         key = idempotency_key or body.idempotency_key
-        if key:
-            body.idempotency_key = key
-            existing = await engine.repo.find_investigation_by_key(key)
-            if existing is not None:
-                if existing["title"] != body.title:
-                    raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
-                return JSONResponse(status_code=200, content=_inv_json(existing))
         try:
-            inv = await engine.orchestrator.start_investigation(body)
+            async with engine.ai_connections.lock:
+                if key:
+                    body.idempotency_key = key
+                    existing = await engine.repo.find_investigation_by_key(key)
+                    if existing is not None:
+                        if existing["title"] != body.title:
+                            raise ApiError("idempotency_conflict", "clé d'idempotence déjà utilisée pour une autre ressource (V1.5)", 409)
+                        return JSONResponse(status_code=200, content=_inv_json(existing))
+                engine.ai_connections.ensure_ready()
+                inv = await engine.orchestrator.start_investigation(body)
         except asyncpg.UniqueViolationError:
             existing = await engine.repo.find_investigation_by_key(key)
             if existing is None:
@@ -338,7 +345,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
     @app.post("/api/v1/investigations/{investigation_id}/resume")
     async def resume_investigation(investigation_id: str, request: Request) -> dict:
         await require_auth(request)
-        inv = await engine.orchestrator.resume(investigation_id)
+        async with engine.ai_connections.lock:
+            engine.ai_connections.ensure_ready()
+            inv = await engine.orchestrator.resume(investigation_id)
         return _inv_json(inv)
 
     @app.post("/api/v1/investigations/{investigation_id}/branches", status_code=201)
@@ -352,7 +361,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         if idempotency_key:
             body.idempotency_key = idempotency_key
         try:
-            branch = await engine.orchestrator.create_branch(investigation_id, body)
+            async with engine.ai_connections.lock:
+                engine.ai_connections.ensure_ready()
+                branch = await engine.orchestrator.create_branch(investigation_id, body)
         except asyncpg.UniqueViolationError:
             existing = await engine.repo.find_branch_by_key(idempotency_key or "")
             if existing is None:
@@ -814,7 +825,46 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         return {
             "providers": providers,
             "fallback_local_to_cloud_authorized": bool(engine.broker.allowed_fallbacks.get("local")),
+            **engine.ai_connections.view(),
         }
+
+    async def read_connection(request: Request, model: type[ConnectionBody]) -> ConnectionBody:
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise ApiError("invalid_provider_configuration", "Envoie la configuration au format JSON.", 415)
+        # Les erreurs de validation de FastAPI peuvent inclure la valeur reçue.
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 16_384:
+                raise ApiError("invalid_provider_configuration", "Configuration trop volumineuse.", 413)
+            raw.extend(chunk)
+        try:
+            return model.model_validate_json(raw)
+        except ValidationError:
+            raise ApiError("invalid_provider_configuration", "Vérifie le modèle, l’adresse API, la clé et les tarifs.", 422) from None
+
+    @app.put("/api/v1/ai/providers/{provider_key}")
+    async def ai_configure(provider_key: ProviderKey, request: Request) -> dict:
+        """Enregistre les métadonnées du fournisseur et garde la clé saisie en mémoire."""
+        await require_auth(request)
+        body = await read_connection(request, ConnectionUpdate)
+        await engine.ai_connections.configure(provider_key, body)
+        _audit_op("op.ai.configure", request, {"provider_key": provider_key})
+        return engine.ai_connections.view()
+
+    @app.put("/api/v1/ai/selection/{provider_key}")
+    async def ai_select(provider_key: Literal["simulated", "local", "mistral", "compatible"], request: Request) -> dict:
+        await require_auth(request)
+        await engine.ai_connections.select(provider_key)
+        _audit_op("op.ai.select", request, {"provider_key": provider_key})
+        return engine.ai_connections.view()
+
+    @app.post("/api/v1/ai/providers/{provider_key}/test")
+    async def ai_test_connection(provider_key: ProviderKey, request: Request) -> dict:
+        """Liste les modèles avec les champs saisis, sans les enregistrer ni envoyer de prompt."""
+        await require_auth(request)
+        body = await read_connection(request, ConnectionCredentials)
+        adapter = engine.ai_connections.test_adapter(provider_key, body)
+        return await ping_provider(adapter, provider_key, request)
 
     @app.post("/api/v1/ai/fallback")
     async def ai_fallback(request: Request, body: AIFallbackRequest) -> dict:
@@ -822,11 +872,9 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         (autorisation de transmission persistée). Sans cette autorisation, aucun repli n'est
         possible ; avec, le repli payant reste soumis à la réservation budgétaire (T8.4)."""
         await require_auth(request)
-        await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", body.enabled)
-        if body.enabled and "local" in engine.broker.adapters and "mistral" in engine.broker.adapters:
-            engine.broker.allowed_fallbacks["local"] = "mistral"
-        else:
-            engine.broker.allowed_fallbacks.pop("local", None)
+        async with engine.ai_connections.lock:
+            await engine.repo.set_setting("allow_ai_fallback_local_to_cloud", body.enabled)
+            engine.ai_connections.refresh_fallback(body.enabled)
         _audit_op("op.ai.fallback.toggle", request, {"enabled": body.enabled})
         return {"allow_ai_fallback_local_to_cloud": body.enabled, "fallbacks": dict(engine.broker.allowed_fallbacks)}
 
@@ -838,12 +886,23 @@ def create_app(engine: Engine, web_ui: bool | None = None) -> FastAPI:
         adapter = engine.broker.adapters.get(body.provider_key)
         if adapter is None:
             raise ApiError("not_found", "fournisseur inconnu", 404)
+        return await ping_provider(adapter, body.provider_key, request)
+
+    async def ping_provider(adapter: AIAdapter, provider_key: str, request: Request) -> dict:
         try:
             result = await adapter.ping()
         except Exception as exc:
-            engine.audit.log("op.ai.test", "failure", detail={"provider_key": body.provider_key}, client=_client(request))
-            raise ApiError("ai_test_failed", f"test de connexion échoué : {exc}", 502) from exc
-        _audit_op("op.ai.test", request, {"provider_key": body.provider_key, "ok": True})
+            engine.audit.log("op.ai.test", "failure", detail={"provider_key": provider_key}, client=_client(request))
+            if isinstance(exc, AIAdapterError) and exc.status in (401, 403):
+                message = "Accès refusé par le fournisseur. Vérifie la clé API et ses autorisations."
+            elif isinstance(exc, NetworkDeny):
+                message = "Adresse bloquée par la politique réseau OSIA. Vérifie le domaine et l’adresse de base."
+            elif isinstance(exc, AIAdapterError) and exc.status is not None and exc.status != 200:
+                message = f"Le fournisseur a répondu HTTP {exc.status}. Vérifie l’adresse de base et l’accès à /models."
+            else:
+                message = "Connexion impossible. Vérifie l’adresse de base et la disponibilité du service."
+            raise ApiError("ai_test_failed", message, 502) from None
+        _audit_op("op.ai.test", request, {"provider_key": provider_key, "ok": True})
         return result
 
     web_dir = (pathlib.Path(__file__).resolve().parent.parent / "web").resolve()

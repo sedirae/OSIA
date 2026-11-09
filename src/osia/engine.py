@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from .ai import AIBroker, ChatCompletionsAdapter, build_ai_adapters
+from .ai.connections import AIConnections, CONFIG_SETTING, ConnectionsState
 from .backup import BackupService
 from .config import Settings
 from .connectors import ConnectorHealthChecker, ConnectorRegistry, SimulatedConnector
@@ -39,6 +41,7 @@ class Engine:
         self.policy: PolicyEngine
         self.registry: ConnectorRegistry
         self.broker: AIBroker
+        self.ai_connections: AIConnections
         self.filestore: FileStore
         self.graph: GraphService
         self.report: ReportService
@@ -96,7 +99,9 @@ class Engine:
         self.policy.allow_target(connector.manifest.id)
         # CON-11 (V1.3) : adaptateurs IA réels selon la configuration ; CON-07/CON-08 : connecteurs
         # réels V1.2. Leurs domaines alimentent l'allowlist du NetworkGuard AVANT sa création.
-        ai_adapters, role_models, ai_domains = build_ai_adapters(self.settings, self.secrets)
+        ai_state = ConnectionsState.model_validate(await self.repo.get_setting(CONFIG_SETTING, {}))
+        ai_settings = replace(self.settings, ai_provider_explicit=False) if ai_state.selected is not None else self.settings
+        ai_adapters, role_models, ai_domains = build_ai_adapters(ai_settings, self.secrets)
         real_connectors = build_real_connectors()
         allowed_domains = set(self.settings.net_allow_domains)
         for entry in self.registry.list():
@@ -120,21 +125,16 @@ class Engine:
             if isinstance(ad, ChatCompletionsAdapter) and not getattr(ad, "is_local", False):
                 ad.netguard = self.netguard  # host externe (ex. api.mistral.ai) : guard T5.4
             self.policy.allow_target(f"{ad.provider}:{ad.model}")
-        # Repli local -> cloud (T8.9, V1.3, D2 §4.4) : UNIQUEMENT si autorisation de transmission
-        # persistée ; le repli payant passe en outre par la réservation budgétaire (T8.4).
-        fallback_allowed = await self.repo.get_setting("allow_ai_fallback_local_to_cloud", False)
-        allowed_fallbacks = {}
-        if fallback_allowed and "local" in ai_adapters and "mistral" in ai_adapters:
-            allowed_fallbacks = {"local": "mistral"}
         self.broker = AIBroker(
             self.policy,
             self.bus,
             ai_adapters,
             role_models=role_models,
-            allowed_fallbacks=allowed_fallbacks,
             semaphore=self.external_semaphore,
             techlog=self.techlog,
         )
+        self.ai_connections = AIConnections(self.settings, self.repo, self.broker, self.netguard)
+        await self.ai_connections.restore(ai_state)
         self.health = ConnectorHealthChecker(self.registry)
         self.graph = GraphService(self.pool, self.repo, self.bus, registry=self.registry)
         self.report = ReportService(self.pool, self.repo, graph=self.graph)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Awaitable, Callable, Optional, Type, TypeVar
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ DEFAULT_MISTRAL_MODEL = "mistral-small-2603"  # V1.3 : Mistral Small 4
 DEFAULT_LOCAL_MODEL = "ministral-3-8b"  # V1.3 : premier candidat local à qualifier
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1"  # endpoint OpenAI-compatible local (Ollama…)
 DEFAULT_MISTRAL_API_BASE = "https://api.mistral.ai/v1"
+MODEL_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,159}$"
 
 # Contrat d'un fetch POST injecté (tests hors ligne) : (url, payload, headers) -> (status, headers, body).
 PostFetchFn = Callable[[str, Optional[dict], dict], Awaitable[tuple[int, dict, bytes]]]
@@ -217,8 +219,17 @@ class ChatCompletionsAdapter(AIAdapter):
         try:
             data = json.loads(body.decode("utf-8"))
             raw = data.get("data", data.get("models", []))
-            models = [m.get("id") for m in raw if isinstance(m, dict) and m.get("id")]
-        except (json.JSONDecodeError, AttributeError, UnicodeDecodeError) as exc:
+            if not isinstance(raw, list):
+                raise TypeError
+            models = []
+            for entry in raw:
+                model_id = entry.get("id") if isinstance(entry, dict) else None
+                if (isinstance(model_id, str) and re.fullmatch(MODEL_PATTERN, model_id)
+                        and (not self.api_key or self.api_key not in model_id)):
+                    models.append(model_id)
+                    if len(models) == 500:
+                        break
+        except (json.JSONDecodeError, AttributeError, TypeError, UnicodeDecodeError) as exc:
             raise AIAdapterError(f"fournisseur {self.provider} : liste des modèles illisible", status=status) from exc
         return {"ok": True, "provider": self.provider, "model": self.model, "paid": self.paid, "models": models}
 

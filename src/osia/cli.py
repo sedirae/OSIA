@@ -59,10 +59,16 @@ async def _cmd_version(args) -> int:
 
 async def _cmd_investigation_start(args) -> int:
     from .engine import Engine
-    from .models import CreateInvestigationRequest
+    from .models import ApiError, CreateInvestigationRequest
 
     engine = Engine(_settings())
     await engine.setup()
+    try:
+        engine.ai_connections.ensure_ready()
+    except ApiError as exc:
+        print(exc.message, file=sys.stderr)
+        await engine.pool.close()
+        return 1
     await engine.start()
     req = CreateInvestigationRequest(
         title=args.title,
@@ -551,6 +557,10 @@ async def _cmd_recette_run(args) -> int:
     settings = _settings()
     engine = Engine(settings)
     await engine.setup()
+    if set(engine.broker.role_models.values()) != {"simulated"}:
+        print("La recette hors ligne nécessite le mode IA simulé.", file=sys.stderr)
+        await engine.pool.close()
+        return 1
     out_dir = pathlib.Path(args.out) if args.out else settings.paths.data_dir / "releves"
     out_dir.mkdir(parents=True, exist_ok=True)
     if args.scenario == "all":
