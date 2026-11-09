@@ -46,30 +46,31 @@ class Scheduler:
         travail en cours restent actives et leurs tâches 'queued' sont exécutables.
         """
         async with self.pool.acquire() as conn:
-            interrupted = await conn.fetch(
-                "UPDATE tasks SET state = 'interrupted', updated_at = now() "
-                "WHERE state IN ('claimed', 'running') RETURNING id, investigation_id"
-            )
-            ops = await conn.fetch(
-                "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
-                "WHERE state IN ('reserved', 'in_flight') RETURNING id, investigation_id"
-            )
-            orphan_authorized = await conn.fetch(
-                "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
-                "WHERE state = 'authorized' RETURNING id, investigation_id"
-            )
-            affected = {row["investigation_id"] for row in interrupted}
-            affected.update(row["investigation_id"] for row in ops)
-            affected.update(row["investigation_id"] for row in orphan_authorized)
-            suspended = []
-            for investigation_id in affected:
-                row = await conn.fetchrow(
-                    "UPDATE investigations SET state = 'suspended', stop_reason = 'crash_recovery', updated_at = now() "
-                    "WHERE id = $1 AND state = 'running' RETURNING id",
-                    investigation_id,
+            async with conn.transaction():
+                interrupted = await conn.fetch(
+                    "UPDATE tasks SET state = 'interrupted', updated_at = now() "
+                    "WHERE state IN ('claimed', 'running') RETURNING id, investigation_id"
                 )
-                if row is not None:
-                    suspended.append(row)
+                ops = await conn.fetch(
+                    "UPDATE external_ops SET state = 'uncertain', updated_at = now() "
+                    "WHERE state IN ('reserved', 'in_flight') RETURNING id, investigation_id"
+                )
+                orphan_authorized = await conn.fetch(
+                    "UPDATE external_ops SET state = 'cancelled', updated_at = now() "
+                    "WHERE state = 'authorized' RETURNING id, investigation_id"
+                )
+                affected = {row["investigation_id"] for row in interrupted}
+                affected.update(row["investigation_id"] for row in ops)
+                affected.update(row["investigation_id"] for row in orphan_authorized)
+                suspended = []
+                for investigation_id in affected:
+                    row = await conn.fetchrow(
+                        "UPDATE investigations SET state = 'suspended', stop_reason = 'crash_recovery', updated_at = now() "
+                        "WHERE id = $1 AND state = 'running' RETURNING id",
+                        investigation_id,
+                    )
+                    if row is not None:
+                        suspended.append(row)
         for row in interrupted:
             await self.bus.emit(
                 type="recovery.task_interrupted",

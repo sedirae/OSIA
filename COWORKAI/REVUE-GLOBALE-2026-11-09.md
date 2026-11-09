@@ -19,7 +19,7 @@ aucun appel IA facturable n’a été réalisé.
 | --- | --- | --- | --- |
 | G01 | P1 | `OSIA_MODE=Server` ou une autre faute contournait à la fois les règles Desktop et Server. | Refus de tout mode inconnu, port invalide ou paire TLS incomplète avant lancement. Tests de configuration. |
 | G02 | P1 | Le service Desktop sans jeton acceptait un `Host` arbitraire et une origine tierce ; la boucle locale seule ne protège pas du rebinding DNS. | Vérification du Host local et de l’Origin. Tests API de refus et accès légitime. |
-| G03 | P1 | Un deuxième moteur exécutait `recover()` sur les tâches du premier avant même de découvrir le port HTTP occupé. | Verrou PostgreSQL conservé pendant la vie de l’ordonnanceur, refus du second moteur avant récupération. Test avec une tâche réellement en cours. La santé signale aussi un ordonnanceur arrêté. |
+| G03 | P1 | Un deuxième moteur exécutait `recover()` sur les tâches du premier avant même de découvrir le port HTTP occupé ; un incident au milieu de la récupération laissait des états partiels. | Verrou PostgreSQL conservé pendant la vie de l’ordonnanceur, refus du second moteur avant récupération et récupération transactionnelle. Tests avec une tâche réellement en cours et un incident au milieu de la reprise. La santé signale aussi un ordonnanceur arrêté. |
 | G04 | P2 | Deux initialisations pouvaient rejouer le même DDL ; une erreur de démarrage pouvait laisser le pool ouvert. | Migrations sérialisées dans une transaction, fermeture sur échec, arrêt couvert par `finally`. Test de trois migrations simultanées sur base vide. |
 | G05 | P2 | Durée des sessions, rétention d’audit et désactivation des connecteurs étaient perdues ou ignorées après redémarrage. | Restauration des valeurs persistées et persistance des bascules de connecteurs. Test avec une nouvelle instance du moteur. |
 | G06 | P1 | Un usage IA vide/incomplet devenait un coût nul ; une mauvaise forme pouvait lever pendant le bilan. | Compteurs entiers non négatifs et complets exigés ; sinon coût incertain et réservation conservée. Huit réponses fournisseur malformées testées via le courtier. |
@@ -37,7 +37,11 @@ de la seule présence de tests.
 
 ## Vérifications et limites
 
-- Suite locale finale au moment de cette rédaction : **307 réussis, 1 ignoré**.
+- Suite locale complète : **307 réussis, 1 ignoré**, puis **43 tests ciblés réussis**
+  après ajout de la récupération transactionnelle et de son test de rollback.
+- Première CI de cette revue : **308 réussis, zéro ignoré**, sur `b52acf4`,
+  [exécution 42644813688](https://github.com/sedirae/OSIA/actions/runs/42644813688).
+  La validation du correctif de reprise est consignée dans sa PR dédiée.
 - Le test ignoré est exclusivement la recette Chromium : le navigateur échoue ici à
   créer son socket Unix (`Operation not permitted`). La CI installe Chromium et rend
   cette recette obligatoire avec `OSIA_BROWSER_TESTS=1`.
