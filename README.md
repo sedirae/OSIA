@@ -4,6 +4,8 @@
 
 OSIA est un moteur d'investigation sur sources publiques : il part d'indices et d'un objectif facultatif, conduit une recherche automatique bornée, conserve les preuves et restitue des conclusions vérifiables. L'utilisateur garde le contrôle des corrections, approfondissements, transmissions et budgets.
 
+Pour installer OSIA sous Linux depuis ce dépôt, lance `./install.sh`. L’assistant guide le choix du mode, de la base PostgreSQL et de l’interface web. Les prérequis et les commandes de démarrage sont détaillés dans [INSTALL.md](INSTALL.md).
+
 Ce dossier est le remplacement documentaire préparé à partir des cadrages produits dans ChatGPT. Aucun contenu du dépôt GitHub existant n'a été utilisé comme autorité. Les fichiers fournis sont destinés à devenir les références actives ; ils ne décrivent pas une application déjà développée.
 
 ## Commencer ici

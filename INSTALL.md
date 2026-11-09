@@ -2,6 +2,30 @@
 
 OSIA est un package Python installable (monolithe modulaire, `src/osia`) : CLI `osia`, API REST/SSE et interface web facultative. Aucune image Docker n'est requise (règle AGENTS.md n°8).
 
+## Installation guidée
+
+Dans le dossier du dépôt, lance avec ton compte Linux habituel :
+
+```bash
+./install.sh
+```
+
+L’assistant demande le mode **Desktop** ou **Server**, une base PostgreSQL locale dédiée ou existante, puis l’activation de l’interface web. Il crée l’environnement Python, installe OSIA, initialise les répertoires et applique les migrations. À la fin, il indique la commande de démarrage propre à ton compte, généralement `~/.local/bin/osia`.
+
+Pour la base locale, PostgreSQL serveur et ses outils doivent être installés. Par exemple, sous Debian ou Ubuntu :
+
+```bash
+sudo apt install python3 python3-venv postgresql postgresql-client
+```
+
+Sous Fedora, les paquets correspondants sont `python3`, `postgresql-server` et `postgresql`. L’installation des dépendances Python nécessite un accès aux paquets configurés pour `pip`. L’assistant crée une instance PostgreSQL séparée, accessible sur la boucle locale et protégée par un mot de passe généré. Elle démarre pendant l’installation, puis au lancement d’OSIA si nécessaire, et reste active jusqu’à `~/.local/bin/osia db stop`. Son état est consultable avec `~/.local/bin/osia db status`.
+
+Le choix d’une base existante demande son adresse PostgreSQL, saisie sans affichage. Pour une installation non interactive, définis `OSIA_INSTALL_DB_DSN` dans l’environnement puis utilise, par exemple, `./install.sh --mode server --database existing --no-web`. Le mode serveur reste lié à l’adresse locale par défaut et exige une authentification. Son jeton est accessible avec `~/.local/bin/osia auth token` après le premier démarrage.
+
+La configuration est enregistrée dans `~/.config/osia/installation.json` et l’adresse de base, qui peut contenir un mot de passe, dans `~/.config/osia/database.secret`, lisible uniquement par le propriétaire et exclue des sauvegardes. Les variables XDG correspondantes permettent de personnaliser les répertoires. Une installation existante n’est jamais écrasée. Le programme s’exécute au premier plan ; pour l’arrêter, utilise `Ctrl+C`.
+
+La procédure manuelle reste disponible ci-dessous.
+
 ## 1. Prérequis
 
 | Élément | Détail |
