@@ -59,10 +59,7 @@ class BudgetManager:
                 if isinstance(br_limits, str):
                     br_limits = json.loads(br_limits)
                 caps["branch"] = min(inv_cap, int(br_limits["max_cost_cents"]))
-        if await self._paid_enabled(conn):
-            caps["global_month"] = await self._global_cap(conn)
-        else:
-            caps["global_month"] = 0
+        caps["global_month"] = await self._global_cap(conn)
         return caps
 
     async def _used(
@@ -152,9 +149,12 @@ class BudgetManager:
                     )
                     if locked_branch is None:
                         raise PolicyDeny("branche_inconnue", "ledger")
-                if await self._paid_enabled(conn):
-                    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('osia:budget:global_month'))")
+                await conn.execute("SELECT pg_advisory_xact_lock(hashtext('osia:budget:global_month'))")
+                if not await self._paid_enabled(conn):
+                    raise PolicyDeny("budget_appels_payants_desactives", "global_month")
                 caps = await self._caps(conn, investigation_id, branch_id)
+                if caps["global_month"] == 0:
+                    raise PolicyDeny("plafond_global_month_zero", "global_month")
                 used = await self._used(conn, investigation_id, branch_id, provider, model, period)
                 for scope, cap in caps.items():
                     if used.get(scope, 0) + amount_cents > cap:
@@ -249,6 +249,9 @@ class BudgetManager:
         period = _period(datetime.now(timezone.utc))
         async with self.pool.acquire() as conn:
             caps = await self._caps(conn, investigation_id, branch_id)
+            paid_enabled = await self._paid_enabled(conn)
+            if not paid_enabled:
+                caps["global_month"] = 0
             used = await self._used(conn, investigation_id, branch_id, None, None, period)
         reserved = int(
             await self.pool.fetchval(
@@ -281,15 +284,18 @@ class BudgetManager:
         available = min(cap - used.get(scope, 0) for scope, cap in caps.items())
         # D3 §5.4 : avertissements à l'approche d'un plafond (seuil 80 %)
         warnings: list[str] = []
+        if not paid_enabled:
+            warnings.append("Appels payants désactivés. Pour utiliser un fournisseur cloud, autorise-les dans les paramètres globaux.")
+        elif caps["global_month"] == 0:
+            warnings.append("Le plafond mensuel global est à 0 €. Fixe un plafond positif dans les paramètres globaux pour utiliser un fournisseur cloud.")
+        scope_labels = {"investigation": "de l’investigation", "branch": "de la branche", "global_month": "mensuel global"}
         for scope, cap in caps.items():
-            u = used.get(scope, 0)
             if cap <= 0:
-                if scope == "global_month":
-                    warnings.append("appels payants désactivés : plafond global mensuel à 0 (V1.4, budget 0 € au premier démarrage)")
                 continue
+            u = used.get(scope, 0)
             pct = round(100 * u / cap)
             if pct >= 80:
-                warnings.append(f"plafond {scope} atteint à {pct} % ({u}/{cap} centimes)")
+                warnings.append(f"Plafond {scope_labels[scope]} utilisé à {pct} % ({u}/{cap} centimes).")
         return BudgetView(
             estimated_cents=estimated,
             reserved_cents=max(reserved, 0),
