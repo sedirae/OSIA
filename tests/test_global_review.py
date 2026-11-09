@@ -293,3 +293,20 @@ async def test_encrypted_upload_uses_header_and_rejects_url_secret(engine, tmp_p
         assert response.status_code == 400
         response = await client.post("/api/v1/import/apply", content=archive.read_bytes(), headers=headers)
         assert response.status_code == 201
+
+
+async def test_recovery_failure_rolls_back_all_transitions(engine):
+    import asyncpg
+    inv = await make_investigation(engine)
+    task = (await engine.repo.list_tasks(inv["id"]))[0]
+    await engine.repo.set_task_state(task["id"], "running")
+    await engine.pool.execute("""
+        CREATE FUNCTION reject_recovery() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'incident de recette'; END $$;
+        CREATE TRIGGER reject_recovery BEFORE UPDATE ON investigations
+        FOR EACH ROW EXECUTE FUNCTION reject_recovery();
+    """)
+    with pytest.raises(asyncpg.RaiseError):
+        await engine.scheduler.recover()
+    assert (await engine.repo.get_task(task["id"]))["state"] == "running"
+    assert (await engine.repo.get_investigation(inv["id"]))["state"] == "running"
