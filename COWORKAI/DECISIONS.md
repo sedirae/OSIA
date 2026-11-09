@@ -208,3 +208,11 @@ La vérification de clôture confirme la clôture du suivi des PR (CI verte sur 
 | EXEC-06 (notification de version) | **Livré** : check best-effort au démarrage du serveur via le NetworkGuard + `osia version --check` + `GET /api/v1/system/version` ; mises à jour toujours manuelles, aucune mise à jour automatique | `src/osia/version.py`, `src/osia/server.py`, `src/osia/api/app.py`, `src/osia/cli.py`, `tests/test_audit_cloture.py` |
 | V1.2 / B-ACC-04 / AC-T5-03 (Playwright) | **Décision ouverte soumise au porteur** : report en V2 à acter explicitement, puis à répercuter dans PERIMETRE-V1 et la matrice de recette (issue de suivi dédiée) | COWORKAI/RECETTE-APPLICATIVE.md §8 |
 | Qualification externe BODACC/GLEIF | Reste à réaliser hors CI (aucun appel réel effectué) | COWORKAI/RECETTE-APPLICATIVE.md §8 |
+
+## Décision porteur complémentaire — 09/11/2026 — écran « Paramètres » dans l'interface web
+
+Lors de l'installation (09/11/2026), le porteur a réaffirmé une exigence exprimée dans la conversation de cadrage initiale mais non reprise dans le lot C consolidé : pouvoir **configurer l'instance depuis l'interface web**. Changement de périmètre acté par le porteur ; la divergence avec `CADRAGE/LOTS/C.md` (qui laissait « paramètres globaux » et « clés/API » à D/T2/T7, avec une surface CLI/API prescrite par CON-11 et CON-13) est exposée ici, pas absorbée silencieusement.
+
+- **Livré** : vue `#/parametres` (`src/osia/web/`) adossée aux API existantes — fournisseurs IA (liste `GET /api/v1/ai/providers`, test de connexion non facturé `POST /api/v1/ai/test`, autorisation de repli local→cloud `POST /api/v1/ai/fallback`), paramètres globaux (`GET/PUT /api/v1/settings`), profils (`GET/POST /api/v1/profiles`), connecteurs (`GET /api/v1/connectors`, `POST .../toggle` avec confirmation explicite pour un connecteur expérimental, T5.1), noms des secrets (`GET /api/v1/secrets`).
+- **Contrainte conservée** : aucune clé ou valeur de secret n'est saisie, affichée ou transmise par le navigateur (D2 §4.3, T5.5, OSIA-I-12) — le coffre reste géré en CLI (`osia secrets list|set|delete`).
+- **Vérification** : `tests/test_web.py::test_web_settings_view_wired_to_existing_api` + tests API existants (`test_con06.py`, `test_con11.py`, `test_con13.py`) + smoke Node `test_app_js_smoke_node`.

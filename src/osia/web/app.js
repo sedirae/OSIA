@@ -134,14 +134,18 @@
   function parseRoute() {
     var h = (window.location.hash || '#/').replace(/^#/, '');
     var m = h.match(/^\/inv\/(.+)$/);
-    if (!m) return { name: 'home' };
-    var id = m[1];
-    try { id = decodeURIComponent(id); } catch (e) { return { name: 'home' }; }
-    return { name: 'inv', id: id };
+    if (m) {
+      var id = m[1];
+      try { id = decodeURIComponent(id); } catch (e) { return { name: 'home' }; }
+      return { name: 'inv', id: id };
+    }
+    if (h === '/parametres') return { name: 'settings' };
+    return { name: 'home' };
   }
   async function renderRoute() {
     var route = parseRoute();
     if (route.name === 'inv') await renderInvestigation(route.id);
+    else if (route.name === 'settings') await renderSettings();
     else await renderHome();
   }
 
@@ -245,6 +249,209 @@
         if (he) he.textContent = 'Lancement refusé : ' + e.message;
       }
     });
+  }
+
+  var SETTING_INPUT_TYPES = { paid_calls_enabled: 'bool', timezone: 'text' };
+  var LIMIT_KEYS = ['max_rebonds', 'max_source_requests', 'max_ai_calls', 'max_duration_seconds', 'max_cost_cents'];
+  var TRUST_LABEL = { official: 'officiel', experimental: 'expérimental', community: 'communautaire' };
+
+  function settingsErrorNode() { return el('p', { class: 'muted small', role: 'alert' }); }
+
+  async function renderSettings() {
+    state.invId = null;
+    var app = $('app');
+    if (!app) return;
+    clear(app);
+    app.appendChild(el('h1', { text: 'Paramètres' }));
+    app.appendChild(el('p', { class: 'muted small', text: 'Configuration de l’instance. Aucune clé API n’est saisie ni affichée ici (D2 §4.3 / T5.5) : les secrets se gèrent dans le coffre serveur, en CLI (`osia secrets set <nom>`).' }));
+    await renderAiCard(app);
+    await renderGlobalSettingsCard(app);
+    await renderProfilesCard(app);
+    await renderConnectorsCard(app);
+    await renderSecretsCard(app);
+  }
+
+  async function renderAiCard(app) {
+    var card = el('section', { class: 'card' });
+    card.appendChild(el('h2', { text: 'Fournisseurs IA' }));
+    var err = settingsErrorNode();
+    card.appendChild(err);
+    try {
+      var data = await apiJson('/api/v1/ai/providers');
+      var ul = el('ul', { class: 'plain' });
+      data.providers.forEach(function (p) {
+        var li = el('li', {});
+        li.appendChild(el('strong', { text: p.key }));
+        li.appendChild(document.createTextNode(' — ' + p.provider + ':' + p.model + ' '));
+        li.appendChild(badge(p.paid ? 'payant, borne ' + fmtCents(p.cost_per_call_cents) + '/appel' : 'non payant', p.paid ? 'a_confirmer' : 'documente'));
+        if (p.roles && p.roles.length) li.appendChild(document.createTextNode(' — rôles : ' + p.roles.join(', ')));
+        if (p.fallback_to) li.appendChild(document.createTextNode(' — repli autorisé vers ' + p.fallback_to));
+        var btn = el('button', { type: 'button', class: 'small', text: 'Tester la connexion (non facturé)' });
+        btn.addEventListener('click', async function () {
+          btn.disabled = true; err.textContent = '';
+          try {
+            var r = await apiJson('/api/v1/ai/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider_key: p.key }) });
+            var n = r && r.models ? r.models.length : 0;
+            err.textContent = p.key + ' : connexion OK, ' + n + ' modèle(s) listé(s).';
+          } catch (e) {
+            if (e.status !== 401) err.textContent = p.key + ' : test échoué — ' + e.message;
+          } finally { btn.disabled = false; }
+        });
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(btn);
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      var fbc = el('input', { type: 'checkbox', id: 'fb-local-cloud' });
+      fbc.checked = !!data.fallback_local_to_cloud_authorized;
+      fbc.addEventListener('change', async function () {
+        err.textContent = '';
+        try {
+          await apiJson('/api/v1/ai/fallback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: fbc.checked }) });
+          err.textContent = fbc.checked ? 'Repli local → cloud autorisé (persisté, audité).' : 'Repli local → cloud révoqué.';
+        } catch (e) { if (e.status !== 401) { err.textContent = 'Modification refusée : ' + e.message; fbc.checked = !fbc.checked; } }
+      });
+      card.appendChild(el('label', { class: 'field' }, [fbc, el('span', { text: 'Autoriser le repli local → cloud (autorisation de transmission persistée, T8.9 ; un repli payant reste soumis à la réservation budgétaire)' })]));
+    } catch (e) { if (e.status !== 401) err.textContent = 'Fournisseurs indisponibles : ' + e.message; }
+    app.appendChild(card);
+  }
+
+  async function renderGlobalSettingsCard(app) {
+    var card = el('section', { class: 'card' });
+    card.appendChild(el('h2', { text: 'Paramètres globaux' }));
+    var err = settingsErrorNode();
+    card.appendChild(err);
+    try {
+      var data = await apiJson('/api/v1/settings');
+      var form = el('form', {});
+      var inputs = {};
+      Object.keys(data.settings).forEach(function (k) {
+        var t = SETTING_INPUT_TYPES[k] || 'number';
+        var inp = el('input', { name: k });
+        if (t === 'bool') { inp.type = 'checkbox'; inp.checked = !!data.settings[k]; }
+        else if (t === 'number') { inp.type = 'number'; inp.step = '1'; inp.min = '0'; inp.value = String(data.settings[k] == null ? '' : data.settings[k]); }
+        else { inp.type = 'text'; inp.value = String(data.settings[k] == null ? '' : data.settings[k]); }
+        inputs[k] = { inp: inp, type: t };
+        form.appendChild(el('label', { class: 'field' }, [el('span', { text: k }), inp]));
+      });
+      form.appendChild(el('button', { type: 'submit', class: 'primary', text: 'Enregistrer' }));
+      form.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        err.textContent = '';
+        var payload = {};
+        Object.keys(inputs).forEach(function (k) {
+          var it = inputs[k];
+          payload[k] = it.type === 'bool' ? it.inp.checked : (it.type === 'number' ? Number(it.inp.value) : it.inp.value);
+        });
+        try {
+          await apiJson('/api/v1/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ settings: payload }) });
+          err.textContent = 'Paramètres enregistrés — applicables aux prochaines opérations (pas de rétroactivité, D7 §9.2).';
+        } catch (e) { if (e.status !== 401) err.textContent = 'Enregistrement refusé : ' + e.message; }
+      });
+      card.appendChild(form);
+    } catch (e) { if (e.status !== 401) err.textContent = 'Paramètres indisponibles : ' + e.message; }
+    app.appendChild(card);
+  }
+
+  async function renderProfilesCard(app) {
+    var card = el('section', { class: 'card' });
+    card.appendChild(el('h2', { text: 'Profils de recherche' }));
+    var err = settingsErrorNode();
+    card.appendChild(err);
+    try {
+      var profiles = await apiJson('/api/v1/profiles');
+      var ul = el('ul', { class: 'plain' });
+      profiles.forEach(function (p) {
+        var li = el('li', {});
+        li.appendChild(el('strong', { text: p.name }));
+        li.appendChild(document.createTextNode(' (' + p.id + ') '));
+        if (p.is_default) li.appendChild(badge('défaut', 'documente'));
+        var lim = p.limits || {};
+        li.appendChild(document.createTextNode(' — ' + LIMIT_KEYS.map(function (k) { return k + '=' + (lim[k] != null ? lim[k] : '…'); }).join(', ')));
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+    } catch (e) { if (e.status !== 401) err.textContent = 'Profils indisponibles : ' + e.message; }
+    var form = el('form', {});
+    form.appendChild(el('h3', { text: 'Nouveau profil' }));
+    form.appendChild(el('label', { class: 'field' }, [el('span', { text: 'Identifiant (minuscules, tirets)' }), el('input', { type: 'text', name: 'id', required: 'required', pattern: '[a-z0-9_-]+' })]));
+    form.appendChild(el('label', { class: 'field' }, [el('span', { text: 'Nom' }), el('input', { type: 'text', name: 'name', required: 'required' })]));
+    LIMIT_KEYS.forEach(function (k) {
+      form.appendChild(el('label', { class: 'field' }, [el('span', { text: k + ' (vide = valeur du profil)' }), el('input', { type: 'number', name: 'lim_' + k, min: '0' })]));
+    });
+    form.appendChild(el('label', { class: 'field' }, [el('input', { type: 'checkbox', name: 'is_default' }), el('span', { text: 'Profil par défaut' })]));
+    form.appendChild(el('button', { type: 'submit', class: 'primary', text: 'Créer le profil' }));
+    form.addEventListener('submit', async function (ev) {
+      ev.preventDefault();
+      err.textContent = '';
+      var fd = new FormData(form);
+      var limits = {};
+      LIMIT_KEYS.forEach(function (k) {
+        var v = fd.get('lim_' + k);
+        if (v !== null && v !== '') limits[k] = Number(v);
+      });
+      try {
+        await apiJson('/api/v1/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: String(fd.get('id') || '').trim(), name: String(fd.get('name') || '').trim(), limits: limits, is_default: !!fd.get('is_default') }) });
+        await renderRoute();
+      } catch (e) { if (e.status !== 401) err.textContent = 'Création refusée : ' + e.message; }
+    });
+    card.appendChild(form);
+    app.appendChild(card);
+  }
+
+  async function renderConnectorsCard(app) {
+    var card = el('section', { class: 'card' });
+    card.appendChild(el('h2', { text: 'Connecteurs (sources)' }));
+    var err = settingsErrorNode();
+    card.appendChild(err);
+    try {
+      var conns = await apiJson('/api/v1/connectors');
+      var ul = el('ul', { class: 'plain' });
+      conns.forEach(function (c) {
+        var li = el('li', {});
+        li.appendChild(el('strong', { text: c.id }));
+        li.appendChild(document.createTextNode(' v' + c.version + ' '));
+        li.appendChild(badge(TRUST_LABEL[c.trust_level] || c.trust_level, c.trust_level === 'experimental' ? 'a_confirmer' : 'documente'));
+        if (c.paid) li.appendChild(badge('payant', 'a_confirmer'));
+        if (c.domains && c.domains.length) li.appendChild(document.createTextNode(' — ' + c.domains.join(', ')));
+        var cb = el('input', { type: 'checkbox' });
+        cb.checked = !!c.enabled;
+        cb.setAttribute('aria-label', 'Activer ' + c.id);
+        var lbl = el('span', { class: 'small', text: c.enabled ? 'activé' : 'désactivé' });
+        cb.addEventListener('change', async function () {
+          err.textContent = '';
+          var confirmFlag = false;
+          if (cb.checked && c.trust_level === 'experimental') {
+            if (!window.confirm('Connecteur expérimental « ' + c.id + ' » : autorisez-vous explicitement son utilisation (T5.1) ?')) { cb.checked = !cb.checked; return; }
+            confirmFlag = true;
+          }
+          try {
+            await apiJson('/api/v1/connectors/' + encodeURIComponent(c.id) + '/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked, confirm: confirmFlag }) });
+            lbl.textContent = cb.checked ? 'activé' : 'désactivé';
+            err.textContent = c.id + (cb.checked ? ' activé.' : ' désactivé.');
+          } catch (e) { if (e.status !== 401) { err.textContent = 'Modification refusée : ' + e.message; cb.checked = !cb.checked; } }
+        });
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(el('label', {}, [cb, lbl]));
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+    } catch (e) { if (e.status !== 401) err.textContent = 'Connecteurs indisponibles : ' + e.message; }
+    app.appendChild(card);
+  }
+
+  async function renderSecretsCard(app) {
+    var card = el('section', { class: 'card' });
+    card.appendChild(el('h2', { text: 'Secrets (coffre)' }));
+    card.appendChild(el('p', { class: 'muted small', text: 'Noms enregistrés uniquement — les valeurs ne quittent jamais le serveur et ne sont jamais saisies dans le navigateur. Gestion en CLI : `osia secrets list|set|delete`.' }));
+    try {
+      var data = await apiJson('/api/v1/secrets');
+      var ul = el('ul', { class: 'plain' });
+      if (!data.names.length) ul.appendChild(el('li', { class: 'muted', text: 'Aucun secret enregistré.' }));
+      data.names.forEach(function (n) { ul.appendChild(el('li', { text: n })); });
+      card.appendChild(ul);
+    } catch (e) { if (e.status !== 401) card.appendChild(el('p', { class: 'muted small', role: 'alert', text: 'Coffre indisponible : ' + e.message })); }
+    app.appendChild(card);
   }
 
   async function loadInvestigationData(id) {
@@ -1086,7 +1293,7 @@
     });
     await init();
   }
-  window.OSIA = { state: state, init: init, renderRoute: renderRoute, el: el, renderHome: renderHome };
+  window.OSIA = { state: state, init: init, renderRoute: renderRoute, el: el, renderHome: renderHome, renderSettings: renderSettings };
   if (typeof document !== 'undefined' && document.getElementById) {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
     else boot();

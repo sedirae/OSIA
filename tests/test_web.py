@@ -140,6 +140,38 @@ async def test_import_apply_accepts_binary_upload(engine):
         assert r5.status_code == 400
 
 
+async def test_web_settings_view_wired_to_existing_api(engine):
+    """Décision porteur du 09/11/2026 : écran « Paramètres » web adossé aux API existantes
+    (fournisseurs IA, test de connexion non facturé, repli local→cloud, paramètres globaux,
+    profils, connecteurs, noms de secrets). Aucune saisie ni lecture de VALEUR de secret côté
+    navigateur : app.js ne doit appeler que GET /api/v1/secrets, jamais PUT/DELETE (D2 §4.3 / T5.5)."""
+    async with await client_for(engine) as client:
+        r = await client.get("/")
+        assert r.status_code == 200
+        assert 'href="#/parametres"' in r.text
+        js = await client.get("/static/app.js")
+        assert js.status_code == 200
+        for needle in (
+            "renderSettings",
+            "'/parametres'",
+            "/api/v1/ai/providers",
+            "/api/v1/ai/test",
+            "/api/v1/ai/fallback",
+            "/api/v1/settings",
+            "/api/v1/profiles",
+            "/api/v1/connectors",
+            "/api/v1/secrets",
+        ):
+            assert needle in js.text, needle
+        assert "/api/v1/secrets/" not in js.text
+        r = await client.get("/api/v1/ai/providers")
+        assert r.status_code == 200 and isinstance(r.json()["providers"], list)
+        r = await client.get("/api/v1/settings")
+        assert r.status_code == 200 and "paid_calls_enabled" in r.json()["settings"]
+        r = await client.get("/api/v1/connectors")
+        assert r.status_code == 200 and isinstance(r.json(), list)
+
+
 def test_app_js_smoke_node():
     """app.js se charge sans exception avec un DOM simulé et rend la vue d'accueil."""
     if shutil.which("node") is None:
