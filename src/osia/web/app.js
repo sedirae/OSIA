@@ -16,7 +16,15 @@
   var HUMAN_LABEL = { unexamined: 'non examiné', validated: 'validé', rejected: 'rejeté' };
   var NATURE_LABEL = { fait_etabli: 'fait établi', information_rapportee: 'information rapportée', indice: 'indice', hypothese: 'hypothèse', conclusion_analytique: 'conclusion analytique' };
   var STATE_LABEL = { created: 'non lancée', running: 'en cours', suspended: 'suspendue', stopped: 'arrêtée', error: 'en erreur' };
-  var STOP_LABEL = { objective_suffisamment_etaye: 'objectif suffisamment étayé', depth_limit: 'limite de profondeur', budget_exhausted: 'budget épuisé', sources_exhausted: 'sources épuisées', user_interrupt: 'arrêt demandé par l’utilisateur', technical_error: 'erreur technique', security_block: 'blocage sécurité', work_exhausted: 'travail épuisé (plus de tâche exécutable)' };
+  var STOP_LABEL = { objective_suffisamment_etaye: 'objectif suffisamment étayé', depth_limit: 'limite de profondeur', budget_exhausted: 'appel bloqué par le budget', sources_exhausted: 'sources épuisées', user_interrupt: 'arrêt demandé par l’utilisateur', technical_error: 'erreur technique', security_block: 'blocage sécurité', work_exhausted: 'travail épuisé (plus de tâche exécutable)' };
+  var BUDGET_DENIAL = new Map([
+    ['budget_appels_payants_desactives', 'Les appels payants étaient désactivés lors de la tentative.'],
+    ['plafond_global_month_zero', 'Le plafond mensuel global était à 0 € lors de la tentative.'],
+    ['plafond_global_month_depasse', 'Le budget mensuel disponible était insuffisant pour cet appel.'],
+    ['plafond_investigation_depasse', 'Le budget de l’investigation était insuffisant pour cet appel.'],
+    ['plafond_branch_depasse', 'Le budget de la branche était insuffisant pour cet appel.'],
+    ['cout_inconnu_bloque', 'OSIA n’a pas pu estimer le coût de l’appel. Vérifie les tarifs du fournisseur actif.']
+  ]);
   var KIND_COLORS = { personne: '#2458C6', organisation: '#6B4FA1', adresse: '#0E7C7B', domaine: '#B3261E', document: '#8A5A00', evenement: '#1E7B34', autre: '#5A6478' };
 
   var state = {
@@ -422,7 +430,7 @@
       fields.appendChild(models);
       cloudPrices.appendChild(field('Tarif d’entrée (€ par million de tokens)', inputPrice));
       cloudPrices.appendChild(field('Tarif de sortie (€ par million de tokens)', outputPrice));
-      cloudPrices.appendChild(el('p', { class: 'muted small', text: 'Vérifie les tarifs du modèle chez le fournisseur. Pour utiliser le cloud, autorise les appels payants dans Paramètres globaux et fixe un budget dans l’investigation.' }));
+      cloudPrices.appendChild(el('p', { class: 'muted small', text: 'Vérifie les tarifs du modèle chez le fournisseur. Pour utiliser le cloud, autorise les appels payants dans Paramètres globaux et vérifie les plafonds mensuel et par investigation.' }));
       fields.appendChild(cloudPrices);
       fields.appendChild(el('div', { class: 'row' }, [test, save]));
       form.appendChild(fields);
@@ -505,6 +513,7 @@
   async function renderGlobalSettingsCard(app) {
     var card = el('section', { class: 'card' });
     card.appendChild(el('h2', { text: 'Paramètres globaux' }));
+    card.appendChild(el('p', { class: 'muted small', text: 'Les appels cloud nécessitent une autorisation et un plafond mensuel positif. Saisis le plafond en centimes (100 = 1 €). Le mode simulé et le fournisseur local fonctionnent sans budget payant.' }));
     var err = settingsErrorNode();
     card.appendChild(err);
     try {
@@ -725,7 +734,8 @@
       try { await apiJson('/api/v1/investigations/' + inv.id + '/resume', { method: 'POST' }); await refreshData(); }
       catch (e) { if (e.status !== 401) window.alert(e.message); }
     });
-    actions.appendChild(stopBtn); actions.appendChild(resumeBtn);
+    if (inv.state === 'running' || inv.state === 'suspended') actions.appendChild(stopBtn);
+    if (inv.state === 'suspended') actions.appendChild(resumeBtn);
     actions.appendChild(el('a', { href: '#/', text: '← Toutes les investigations' }));
     colSuivi.appendChild(actions);
 
@@ -771,11 +781,20 @@
     if (!box || !state.budget) return;
     clear(box);
     var b = state.budget;
+    if (state.inv.stop_reason === 'budget_exhausted') {
+      var refused = state.tasks.find(function (task) { return BUDGET_DENIAL.has(task.error); });
+      if (refused) box.appendChild(el('p', { text: BUDGET_DENIAL.get(refused.error) }));
+      box.appendChild(el('p', {}, [el('a', { href: '#/parametres', text: 'Vérifier le fournisseur et les paramètres de budget' }),
+        '. Une fois les réglages enregistrés, crée une nouvelle investigation.']));
+    }
     var t = el('table', { class: 'mini' });
-    [['Consommé (réel)', fmtCents(b.consumed_cents)], ['Réservé (engagé)', fmtCents(b.reserved_cents)], ['Estimé', fmtCents(b.estimated_cents)], ['Disponible', fmtCents(b.available_cents)], ['Plafond investigation', fmtCents(b.caps && b.caps.investigation)], ['Plafond global mois', fmtCents(b.caps && b.caps.global_month)]].forEach(function (row) {
+    [['Consommé (réel)', fmtCents(b.consumed_cents)], ['Réservé (engagé)', fmtCents(b.reserved_cents)], ['Estimé', fmtCents(b.estimated_cents)], ['Disponible pour les appels payants', fmtCents(b.available_cents)], ['Plafond investigation', fmtCents(b.caps && b.caps.investigation)], ['Plafond global mois', fmtCents(b.caps && b.caps.global_month)]].forEach(function (row) {
       t.appendChild(el('tr', {}, [el('th', { text: row[0] }), el('td', { text: row[1] })]));
     });
     box.appendChild(t);
+    (b.warnings || []).forEach(function (warning) {
+      box.appendChild(el('p', { class: 'small muted', text: warning }));
+    });
     box.appendChild(el('p', { class: 'small muted', text: 'Aucun pourcentage de progression n’est affiché : la complétude d’une investigation exploratoire n’est pas mesurable de façon fiable (C2-10).' }));
   }
 

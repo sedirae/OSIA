@@ -190,6 +190,32 @@ async def test_repli_autorise_avec_budget_fonctionne(engine):
     assert any(e.type == "ai.fallback" for e in events)
 
 
+async def test_cloud_investigation_can_start_after_authorizing_budget(engine):
+    calls = {}
+    engine.broker.adapters["mistral"] = MistralCloudAdapter(
+        api_key="sk-test", fetch_fn=fake_post(chat_completion({}), capture=calls)
+    )
+    engine.broker.role_models["planning"] = "mistral"
+
+    denied = await make_investigation(engine)
+    await engine.scheduler._execute(await engine.repo.claim_next_task())
+    stopped = await engine.repo.get_investigation(denied["id"])
+    assert stopped["state"] == "stopped"
+    assert stopped["stop_reason"] == "budget_exhausted"
+    assert (await engine.repo.list_tasks(denied["id"]))[0]["error"] == "budget_appels_payants_desactives"
+    assert not calls
+
+    async with AsyncClient(transport=ASGITransport(app=create_app(engine)), base_url="http://127.0.0.1") as client:
+        response = await client.put("/api/v1/settings", json={"settings": {
+            "paid_calls_enabled": True, "global_monthly_cap_cents": 100,
+        }})
+    assert response.status_code == 200
+    allowed = await make_investigation(engine)
+    await engine.scheduler._execute(await engine.repo.claim_next_task())
+    assert (await engine.repo.list_tasks(allowed["id"]))[0]["state"] == "succeeded"
+    assert calls["payload"]["model"] == engine.broker.adapters["mistral"].model
+
+
 # ---------- API ----------
 
 

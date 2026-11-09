@@ -48,7 +48,9 @@ const base = process.argv[2];
     } finally {
       releaseList();
     }
-    await page.waitForTimeout(1000); // laisser le plan simulé vide et son dernier rafraîchissement se terminer
+    await page.getByText('arrêtée', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Reprendre', exact: true }).count(), 0);
+    assert.equal(await page.getByText('Appels payants désactivés.', { exact: false }).count(), 1);
     const investigationHash = await page.evaluate(() => location.hash);
 
     // Les erreurs d’import ne doivent jamais apparaître comme un succès.

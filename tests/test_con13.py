@@ -170,7 +170,7 @@ async def test_budget_warnings_approche_plafond(engine):
     )
     assert decision.allowed
     view2 = await engine.budgets.budget_view(inv["id"])
-    assert any("plafond investigation atteint à 80 %" in w for w in view2.warnings)
+    assert any("Plafond de l’investigation utilisé à 80 %" in w for w in view2.warnings)
 
 
 # ---------- API settings / profiles ----------

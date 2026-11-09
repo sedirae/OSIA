@@ -31,12 +31,23 @@ async def test_profile_cap_denies_overspend(engine):
     assert "investigation" in exc.value.reason
 
 
-async def test_paid_disabled_blocks_any_paid_call(engine):
+@pytest.mark.parametrize(("enabled", "cap", "reason", "warning"), [
+    (False, 500, "budget_appels_payants_desactives", "Appels payants désactivés"),
+    (True, 0, "plafond_global_month_zero", "plafond mensuel global est à 0 €"),
+])
+@pytest.mark.parametrize("amount", [0, 1])
+async def test_zero_authorized_budget_blocks_any_paid_call(engine, enabled, cap, reason, warning, amount):
+    await engine.repo.set_setting("paid_calls_enabled", enabled)
+    await engine.repo.set_setting("global_monthly_cap_cents", cap)
     inv = await make_investigation(engine)
     op = await _mk_op(engine, inv["id"])
     with pytest.raises(PolicyDeny) as exc:
-        await engine.budgets.reserve(idempotency_key="k9", investigation_id=inv["id"], op_id=op["id"], amount_cents=1)
-    assert "global_month" in exc.value.reason
+        await engine.budgets.reserve(idempotency_key="k9", investigation_id=inv["id"], op_id=op["id"], amount_cents=amount)
+    assert exc.value.reason == reason
+    view = await engine.budgets.budget_view(inv["id"])
+    assert view.available_cents == 0
+    assert any(warning in message for message in view.warnings)
+    assert await engine.pool.fetchval("SELECT COUNT(*) FROM reservations") == 0
 
 
 async def test_global_monthly_cap(engine):
