@@ -4,8 +4,9 @@
 
 Revue du moteur, API, paramètres IA, frontend, installation, stockage, imports/exports,
 sauvegardes, politiques et coûts. Base : `main` à `a8772bc`, avec les PR #29
-(`887900c`) et #30 (`12463d2`) combinées dans une branche de travail. Aucune fusion
-dans `main`. La branche de revue contient ces deux prérequis et les correctifs ci-dessous.
+(`887900c`) et #30 (`12463d2`) combinées dans la PR #31, fusionnée dans `main` à
+`6072d74`. La PR #33 complète la revue avec la reprise transactionnelle (G03) et
+le correctif du formulaire d’investigation (G14).
 
 Les 272 tests existants passent sur la combinaison initiale. Cela ne suffisait pas :
 24 nouveaux scénarios ont d’abord échoué sur huit familles de défauts. Les scénarios
@@ -30,6 +31,7 @@ aucun appel IA facturable n’a été réalisé.
 | G11 | P2 | Une réponse lente remplaçait la nouvelle page ; le flux SSE continuait après navigation ; la déconnexion laissait les données affichées. | Invalidation des réponses périmées, annulation du suivi, effacement de la vue/session, temporisation à la fermeture du flux. Recette Chromium et smoke JS. |
 | G12 | P2 | Deux requêtes identiques avec des paramètres différents partageaient le cache ; une synthèse de branche recevait l’objectif parent. | Clé de cache versionnée incluant les paramètres, objectif propre à la branche. Tests du pipeline source et du contexte de synthèse. |
 | G13 | P2 | Un téléchargement pip raté laissait un venv qui bloquait toute nouvelle tentative. | Suppression du seul venv créé par la tentative en échec, avant toute création de base ; autres fichiers conservés. Test de deux tentatives consécutives. |
+| G14 | P2 | Un clic rapide pouvait soumettre le formulaire natif avant le branchement du gestionnaire, tant que la liste des investigations chargeait. | Gestionnaire posé avant les requêtes et bouton activé dès la fin du chargement des profils. La recette Chromium lance une investigation avec la réponse de la liste bloquée. |
 
 Les changements se rattachent à EXEC-02/03/05, T2.4, T3.6/11/14, T4.3/7,
 T5.4/7, T7.2/6, T8.4/5 et D7. Aucun changement du périmètre produit n’est déduit
@@ -41,7 +43,9 @@ de la seule présence de tests.
   après ajout de la récupération transactionnelle et de son test de rollback.
 - Première CI de cette revue : **308 réussis, zéro ignoré**, sur `b52acf4`,
   [exécution 42644813688](https://github.com/sedirae/OSIA/actions/runs/42644813688).
-  La validation du correctif de reprise est consignée dans sa PR dédiée.
+- CI après fusion sur `6072d74` : **307 réussis, 1 échec** sur le lancement depuis
+  Chromium ([exécution 42683082212](https://github.com/sedirae/OSIA/actions/runs/42683082212)).
+  La validation des deux correctifs complémentaires est consignée dans la PR #33.
 - Le test ignoré est exclusivement la recette Chromium : le navigateur échoue ici à
   créer son socket Unix (`Operation not permitted`). La CI installe Chromium et rend
   cette recette obligatoire avec `OSIA_BROWSER_TESTS=1`.

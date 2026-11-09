@@ -211,8 +211,10 @@
       det.appendChild(el('label', { class: 'field' }, [el('span', { text: label }), el('input', { type: 'number', name: 'lim_' + k, min: '0' })]));
     });
     form.appendChild(det);
-    form.appendChild(el('button', { type: 'submit', class: 'primary', text: 'Lancer la recherche' }));
-    form.appendChild(el('p', { class: 'muted small', id: 'home-error', role: 'alert' }));
+    var launch = el('button', { type: 'submit', class: 'primary', disabled: '', text: 'Lancer la recherche' });
+    form.appendChild(launch);
+    var launchError = el('p', { class: 'muted small', id: 'home-error', role: 'alert' });
+    form.appendChild(launchError);
     app.appendChild(form);
 
     var listCard = el('section', { class: 'card' });
@@ -221,34 +223,11 @@
     listCard.appendChild(ul);
     app.appendChild(listCard);
 
-    try {
-      var profiles = await apiJson('/api/v1/profiles');
-      if (version !== state.routeVersion) return;
-      var sel = $('profile-select');
-      if (sel) profiles.forEach(function (p) {
-        var o = el('option', { value: p.id, text: p.name + (p.is_default ? ' (défaut)' : '') });
-        if (p.is_default) o.setAttribute('selected', 'selected');
-        sel.appendChild(o);
-      });
-    } catch (e) { /* profils indisponibles */ }
-
-    try {
-      var invs = await apiJson('/api/v1/investigations');
-      if (version !== state.routeVersion) return;
-      clear(ul);
-      if (!invs.length) ul.appendChild(el('li', { class: 'muted', text: 'Aucune investigation pour le moment.' }));
-      invs.forEach(function (inv) {
-        var li = el('li', {});
-        li.appendChild(el('a', { href: '#/inv/' + encodeURIComponent(inv.id), text: inv.title || inv.id }));
-        li.appendChild(document.createTextNode(' '));
-        li.appendChild(badge(STATE_LABEL[inv.state] || inv.state, inv.state === 'running' ? 'running' : inv.state === 'error' ? 'error' : 'stopped'));
-        if (inv.stop_reason) li.appendChild(document.createTextNode(' — ' + (STOP_LABEL[inv.stop_reason] || inv.stop_reason)));
-        ul.appendChild(li);
-      });
-    } catch (e) { if (e.status !== 401) ul.appendChild(el('li', { class: 'muted', text: 'Liste indisponible : ' + e.message })); }
-
     form.addEventListener('submit', async function (ev) {
       ev.preventDefault();
+      if (launch.disabled || version !== state.routeVersion) return;
+      launch.disabled = true;
+      launchError.textContent = '';
       var fd = new FormData(form);
       var limits = {};
       ['max_rebonds', 'max_source_requests', 'max_ai_calls', 'max_duration_seconds', 'max_cost_cents'].forEach(function (k) {
@@ -274,13 +253,42 @@
           throw new Error(j && j.error ? j.error.message : 'HTTP ' + r.status);
         }
         var inv = await r.json();
-        window.location.hash = '#/inv/' + encodeURIComponent(inv.id);
+        if (version === state.routeVersion) window.location.hash = '#/inv/' + encodeURIComponent(inv.id);
       } catch (e) {
-        if (e.status === 401) return;
-        var he = $('home-error');
-        if (he) he.textContent = 'Lancement refusé : ' + e.message;
+        if (version === state.routeVersion && e.status !== 401) {
+          launchError.textContent = 'Lancement refusé : ' + e.message;
+          launch.disabled = false;
+        }
       }
     });
+
+    try {
+      var profiles = await apiJson('/api/v1/profiles');
+      if (version !== state.routeVersion) return;
+      var sel = $('profile-select');
+      if (sel) profiles.forEach(function (p) {
+        var o = el('option', { value: p.id, text: p.name + (p.is_default ? ' (défaut)' : '') });
+        if (p.is_default) o.setAttribute('selected', 'selected');
+        sel.appendChild(o);
+      });
+    } catch (e) { /* profils indisponibles */ }
+    if (version !== state.routeVersion) return;
+    launch.disabled = false;
+
+    try {
+      var invs = await apiJson('/api/v1/investigations');
+      if (version !== state.routeVersion) return;
+      clear(ul);
+      if (!invs.length) ul.appendChild(el('li', { class: 'muted', text: 'Aucune investigation pour le moment.' }));
+      invs.forEach(function (inv) {
+        var li = el('li', {});
+        li.appendChild(el('a', { href: '#/inv/' + encodeURIComponent(inv.id), text: inv.title || inv.id }));
+        li.appendChild(document.createTextNode(' '));
+        li.appendChild(badge(STATE_LABEL[inv.state] || inv.state, inv.state === 'running' ? 'running' : inv.state === 'error' ? 'error' : 'stopped'));
+        if (inv.stop_reason) li.appendChild(document.createTextNode(' — ' + (STOP_LABEL[inv.stop_reason] || inv.stop_reason)));
+        ul.appendChild(li);
+      });
+    } catch (e) { if (e.status !== 401) ul.appendChild(el('li', { class: 'muted', text: 'Liste indisponible : ' + e.message })); }
   }
 
   var SETTING_INPUT_TYPES = { paid_calls_enabled: 'bool', timezone: 'text' };

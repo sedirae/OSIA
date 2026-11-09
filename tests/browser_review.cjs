@@ -30,11 +30,24 @@ const base = process.argv[2];
     assert.equal(providers.configurations.local.model, 'test-local');
     assert.equal(providers.selected, 'simulated');
 
-    await page.getByRole('link', { name: 'OSIA', exact: true }).click();
-    await page.locator('input[name="title"]').fill('Recette navigateur');
-    await page.locator('textarea[name="hints"]').fill('indice de test');
-    await page.getByRole('button', { name: 'Lancer la recherche' }).click();
-    await page.getByRole('heading', { name: 'Recette navigateur', exact: true }).waitFor();
+    // La liste des investigations peut rester en attente pendant un lancement.
+    let releaseList;
+    const listPending = new Promise(resolve => { releaseList = resolve; });
+    await page.route('**/api/v1/investigations', async route => {
+      if (route.request().method() === 'GET') await listPending;
+      await route.continue();
+    });
+    const listRequested = page.waitForRequest(req => req.url() === base + '/api/v1/investigations' && req.method() === 'GET');
+    try {
+      await page.getByRole('link', { name: 'OSIA', exact: true }).click();
+      await listRequested;
+      await page.locator('input[name="title"]').fill('Recette navigateur');
+      await page.locator('textarea[name="hints"]').fill('indice de test');
+      await page.getByRole('button', { name: 'Lancer la recherche' }).click();
+      await page.getByRole('heading', { name: 'Recette navigateur', exact: true }).waitFor();
+    } finally {
+      releaseList();
+    }
     await page.waitForTimeout(1000); // laisser le plan simulé vide et son dernier rafraîchissement se terminer
     const investigationHash = await page.evaluate(() => location.hash);
 
